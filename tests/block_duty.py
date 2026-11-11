@@ -627,6 +627,16 @@ def gate_checks() -> None:
         lambda: arb.desired(_Coord(space_lock), space_lock, "dhw", NOW).space_setpoint is None
         and arb.desired(_Coord(space_lock), space_lock, "dhw", NOW).space_lock is True,
     )
+    off_snap = replace(_gate_snap(dhw_lock), config={**dhw_lock, "pump_duty_mode": "off"})
+    off_coord = _Coord(off_snap)
+    arb.state_for(off_coord).loaded = True
+    arb.state_for(off_coord).locks["dhw_lock"] = ("switch.dhw_lock", False)
+    asyncio.run(arb.apply(off_coord, NOW))
+    check(
+        "switching Pump duty control off releases a lock it wrote",
+        lambda: ("switch", "turn_off", {"entity_id": "switch.dhw_lock"}) in off_snap.hass.services.calls,
+    )
+
 
 
 if __name__ == "__main__":
