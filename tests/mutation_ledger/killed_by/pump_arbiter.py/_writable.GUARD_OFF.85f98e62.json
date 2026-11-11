@@ -1,0 +1,6 @@
+{
+  "anchor": "custom_components/heatpump_optimizer/pump_arbiter.py:_writable GUARD_OFF 85f98e62",
+  "killed_by": "tests/features.py",
+  "old": "    if slot in _SWITCH_SLOTS:",
+  "reason": "Re-anchored from 9139b712 (`if slot == \"silent\":`): the guard now names the three switch slots, silent and the two duty locks. Recorded by `mutation_table.py --pin-killed` against 6001b09a557259f37319b400d219cf83e02c563f: GUARD_OFF (`if False:`) took tests/features.py from rc=0 failed=0 to rc=1 failed=2."
+}

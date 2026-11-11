@@ -1238,6 +1238,10 @@
         "data": {
           "heat_pump_mode_entity": "Betriebsart der Wärmepumpe",
           "pump_duty_mode": "Steuerung der Pumpenfunktion",
+          "space_gate": "Wie die Steuerung das Heizen sperrt",
+          "space_lock_entity": "Schalter Heizsperre",
+          "dhw_gate": "Wie die Steuerung Warmwasser sperrt",
+          "dhw_lock_entity": "Schalter Warmwassersperre",
           "heat_pump_defrost_entity": "Abtauen",
           "heat_pump_online_entity": "Pumpe online",
           "heat_pump_fault_entity": "Störungsmeldung",
@@ -1251,6 +1255,10 @@
         "data_description": {
           "heat_pump_mode_entity": "Optional. Die eigene Modusauswahl der Wärmepumpe – Kühlen, Heizen, Warmwasser oder eine Kombination aus zwei. Nur lesend, außer die Steuerung der Pumpenfunktion steht auf Steuern. Eine Wärmepumpe im Kühl- oder reinen Warmwassermodus kann das Haus nicht heizen, und eine im reinen Heizmodus kann kein Warmwasser bereiten; ohne diese Angabe kann der Plan Wärme versprechen, die die Wärmepumpe gerade nicht liefern kann. Bleibt sie leer, geht der Optimierer davon aus, dass die Wärmepumpe alles kann.",
           "pump_duty_mode": "Aus (Standard) schreibt nie auf die Wärmepumpe. Beobachten schreibt nichts und führt in den Diagnosedaten ein 24-Stunden-Protokoll darüber, welche Funktion jeder Planschritt angefordert hat und was die Wärmepumpe getan hat (aus der Leistungsentität, dem Modus und der Speichertemperatur). Steuern schreibt den oben gewählten Betriebsmodus (nur Warmwasser bei reinen Warmwasserschritten, nur Heizen bei reinen Raumheizungsschritten, Heizen + Warmwasser, wenn beides geplant ist oder ein Desinfektionszyklus läuft, unverändert bei Leerlaufschritten), die Entität für den Warmwasser-Sollwert (der auf der Warmwasserseite konfigurierte Warmwasser-Sollwert) und die Entität für den Raumheizungs-Sollwert (bei einem Vorlauf-Sollwert ein Ziel, das der geplanten Leistung folgt – die Heizungsvorlauftemperatur (55 °C, oder flow_heat_c) bei voller Leistung, in Richtung 5 °C (oder flow_min_lift_k) über dem ersten aktuellen Wert von Wärmepumpen-Rücklauf, Pufferspeicher, Fußbodenrücklauf oder Ventilauslass (35 °C, wenn keiner konfiguriert ist) an der Modulationsuntergrenze – oder das Maximum der Entität bei Schritten, die das Haus heizen, ihr Minimum bei Schritten, die es nicht tun, und 35 °C oder die Wetterkurve, wenn der Plan nicht die Führung hat; bei einem Raum-Sollwert die geplante Raumtemperatur). Wo der Modus keine Einzelfunktion anbietet, etwa beim GCHV-Modbus-Paket, wird stattdessen der Sollwert der anderen Funktion auf sein Minimum gesenkt. Ein reiner Warmwasserabschnitt ist auf 90 Minuten begrenzt (30 unter -10 °C Außentemperatur), außer der Raum hat bereits seine geplante Temperatur. Solange Optimierer aktiv eingeschaltet ist, wird jede Änderung an diesen Entitäten, die der Optimierer nicht vorgenommen hat, sofort zurückgeschrieben; schalte Optimierer aktiv aus, um die Wärmepumpe von Hand zu ändern. Ein Wert, den die Wärmepumpe nicht übernimmt, löst eine Warnung aus und wird alle 5 Minuten erneut gesendet.",
+          "space_gate": "Nur wirksam, wenn die Steuerung der Pumpenfunktion auf Steuern steht. Sollwert (Standard) sperrt das Heizen über die Betriebsart oder, wo die Betriebsart keinen reinen Warmwasserbetrieb bietet, über den auf sein Minimum gesenkten Heizsollwert. Sperrschalter sperrt das Heizen, indem der Schalter unten eingeschaltet wird; Freigabeschalter gibt das Heizen frei, solange er an ist. Ein Schalter passt, wenn die Pumpe eine Heizsperre oder -freigabe, aber keinen nutzbaren Sollwert dafür hat. Stehen beide Funktionen auf Schaltern, wird die Betriebsart nicht geschrieben: Lass sie in einer Betriebsart, die beides erlaubt.",
+          "space_lock_entity": "Der Schalter oder Helfer, der das Heizen sperrt (Sperrschalter) oder freigibt (Freigabeschalter). In jedem Schritt ohne Heizen wird er sperrend gehalten, auch im Leerlauf; gibt die Steuerung ihn ab („Optimierer aktiv“ oder Steuerung der Pumpenfunktion aus, Sperrart oder Schalter geändert, Neuladen, Kühlbetrieb), wird er auf Freigabe zurückgeschaltet.",
+          "dhw_gate": "Nur wirksam, wenn die Steuerung der Pumpenfunktion auf Steuern steht. Sollwert (Standard) sperrt Warmwasser über die Betriebsart oder, wo die Betriebsart keinen reinen Heizbetrieb bietet, über den auf sein Minimum gesenkten Warmwassersollwert. Sperrschalter sperrt Warmwasser, indem der Schalter unten eingeschaltet wird; Freigabeschalter gibt es frei, solange er an ist. Mit einem Schalter behält die Warmwasser-Sollwert-Entität in jedem Schritt den eingestellten Sollwert, sodass die Pumpe einen Speicher, den der Plan in Ruhe lässt, nicht mit ihrem eigenen Thermostat nachlädt.",
+          "dhw_lock_entity": "Der Schalter oder Helfer, der Warmwasser sperrt (Sperrschalter) oder freigibt (Freigabeschalter). In jedem Schritt ohne Warmwasser wird er sperrend gehalten, auch im Leerlauf; gibt die Steuerung ihn ab („Optimierer aktiv“ oder Steuerung der Pumpenfunktion aus, Sperrart oder Schalter geändert, Neuladen, Kühlbetrieb), wird er auf Freigabe zurückgeschaltet.",
           "heat_pump_defrost_entity": "Optional. Ein, solange die Wärmepumpe den Kreislauf umkehrt, um Frost vom Außenwärmetauscher zu schmelzen. Der während einer Abtauung bezogene Strom geht in den Wärmetauscher statt ins Haus. Beachte, dass viele Wärmepumpen nur alle paar Minuten abgefragt werden, kurze Abtauvorgänge also komplett übersehen werden: Dies ist eine Stichprobe der Abtauaktivität, keine Stoppuhr.",
           "heat_pump_online_entity": "Optional und bei einer cloudverbundenen Wärmepumpe dringend empfohlen. Ein, solange die Wärmepumpe tatsächlich erreichbar ist. Eine Cloud-Integration kann ihre letzten bekannten Werte weiter veröffentlichen, obwohl die Wärmepumpe selbst vom Netzwerk getrennt ist, sodass alle anderen Sensoren völlig aktuell aussehen; dies ist das einzige Signal, das etwas anderes sagt. Bei einer lokalen Verbindung (LAN) werden die Sensoren von selbst nicht verfügbar, und dies bringt wenig.",
           "heat_pump_fault_entity": "Optional. Ein, solange die Wärmepumpe eine Störung meldet. Verwendet wird nur, ob eine Störung vorliegt, nie der Code selbst.",
@@ -1731,6 +1739,13 @@
         "off": "Aus",
         "observe": "Beobachten (nur protokollieren)",
         "control": "Steuern (Modus und Sollwerte schreiben)"
+      }
+    },
+    "duty_gate": {
+      "options": {
+        "setpoint": "Sollwert (Betriebsart oder gesenkter Sollwert)",
+        "lock": "Sperrschalter (an sperrt)",
+        "release": "Freigabeschalter (an gibt frei)"
       }
     },
     "factory_reset_scope": {

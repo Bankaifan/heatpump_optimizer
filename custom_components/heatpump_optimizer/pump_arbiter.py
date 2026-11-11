@@ -50,6 +50,17 @@ that switch's one writer, shared by the cycle's plan write, the step tick
 (:func:`supply_tick`) and the early cut-off (``early_cutoff.py``), so the
 domain routing has one owner.
 
+**A lock switch per duty** (``space_gate`` / ``dhw_gate``): a pump may offer
+a lock or release for one duty and only a set-point for the other, so each
+duty chooses. A switch-gated duty is held blocked on every step that does not
+serve it, idle included, and its set-point is never lowered to a gate: the
+hot water one holds the configured value (:func:`desired`). With both duties
+on switches the mode is left alone. Letting go of control in any way --
+Optimizer active or Pump duty control off, the gate or switch changed, an
+unload, the pump cooling -- switches each lock it wrote back to allowing
+(:func:`_release_locks`): a lock left blocking keeps the duty off for the
+person who took the pump back.
+
 **Two transports, one logic.** The Tuya fork offers DHW-only and Heating,
 so the mode is the gate there. The GCHV/Rotenso Modbus package's mode
 register offers only Off / Cool + DHW / Heat + DHW -- no single heating
@@ -288,6 +299,9 @@ class PumpCommand:
     space_setpoint: float | None
     #: On or off for the silent switch; ``None`` writes nothing there.
     silent: bool | None = None
+    #: On or off for each duty's lock switch (:func:`_lock_value`).
+    space_lock: bool | None = None
+    dhw_lock: bool | None = None
 
 
 @dataclass
@@ -340,6 +354,10 @@ class ArbiterState:
     #: which a loop-lowered target stopped the compressor (:func:`_feedback`).
     feedback: FeedbackRun | None = None
     stop_gap_k: float | None = None
+    #: lock slot -> (entity, the state that lets its duty run) for each lock
+    #: switch written, persisted: a lock is released by what was written to
+    #: it, not by whatever the configuration names now.
+    locks: dict[str, tuple[str, bool]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -373,7 +391,11 @@ class ArbiterInputs:
 
 _STATES: WeakKeyDictionary[Any, ArbiterState] = WeakKeyDictionary()
 _OWN_MODES = frozenset((pump_mode.MODE_HEAT, pump_mode.MODE_DHW, pump_mode.MODE_HEAT_DHW))
-_SLOTS = ("mode", "dhw_setpoint", "space_setpoint", "silent")
+_SLOTS = ("mode", "dhw_setpoint", "space_setpoint", "silent", "space_lock", "dhw_lock")
+#: The slots written as a switch's on/off, compared and restored as bools.
+_SWITCH_SLOTS = frozenset(("silent", "space_lock", "dhw_lock"))
+#: The gates that hold a lock switch (``const.DUTY_GATES``).
+_SWITCH_GATES = ("lock", "release")
 #: GCHV night-mode registers 518/519 as hour then minute per register (#1913).
 _NIGHT_KEYS = {
     "night_start_hour": "start_hour",
@@ -399,7 +421,26 @@ def _entities(config: Any) -> dict[str, Any]:
         "dhw_setpoint": cfg.dhw_setpoint_entity,
         "space_setpoint": cfg.space_setpoint_entity,
         "silent": silent if quiet_windows.silent_control_usable(silent) else None,
+        "space_lock": cfg.space_lock_entity if cfg.space_gate in _SWITCH_GATES else None,
+        "dhw_lock": cfg.dhw_lock_entity if cfg.dhw_gate in _SWITCH_GATES else None,
     }
+
+
+def _lock_gated(config: Any, duty: str) -> bool:
+    """Whether ``duty`` (``space`` or ``dhw``) is gated by its lock switch."""
+    return _entities(config)[f"{duty}_lock"] is not None
+
+
+def _lock_value(config: Any, duty: str, runs: bool) -> bool | None:
+    """The switch state that lets ``duty`` run (``runs``) or blocks it.
+
+    ``lock`` is a switch that blocks the duty while on, ``release`` one that
+    allows it while on; ``None`` when the duty is not gated by a switch.
+    """
+    if not _lock_gated(config, duty):
+        return None
+    gate = getattr(EntryConfig.from_mapping(config), f"{duty}_gate")
+    return runs if gate == "release" else not runs
 
 
 def _slot_entity(config: Any, slot: str) -> Any:
@@ -1081,14 +1122,42 @@ def _silent_target(coord: Any, inp: ArbiterInputs, now: datetime) -> bool | None
 
 
 def desired(coord: Any, inp: ArbiterInputs, duty: str | None, now: datetime) -> PumpCommand:
-    """The row of the module table for ``duty``; ``None`` is the baseline."""
+    """The row of the module table for ``duty``; ``None`` is the baseline.
+
+    A duty gated by its lock switch (:func:`_lock_value`) is blocked there
+    instead of by a set-point: its own set-point is never lowered to the
+    gate, and the switch is held blocking on every step that does not serve
+    it, idle included, so the pump's own thermostat cannot start it. With
+    both duties on switches the mode is not written at all.
+    """
+    config = inp.config
+    if pump_mode.capability(getattr(_slot_state(inp, "mode"), "state", None)).cooling:
+        # Cooling is the user's season, not a duty the plan chose: hands off,
+        # the silent switch included, and each lock allowing its duty.
+        return PumpCommand(None, None, None, None, _lock_value(config, "space", True),
+                           _lock_value(config, "dhw", True))
+    command = _row(coord, inp, duty, now)
+    space_runs = duty in (None, "space", "both")
+    # A held disinfection cycle outlives its planned step: never locked out.
+    dhw_runs = duty in (None, "dhw", "both") or inp.disinfecting
+    changes: dict[str, Any] = {
+        "space_lock": _lock_value(config, "space", space_runs),
+        "dhw_lock": _lock_value(config, "dhw", dhw_runs),
+    }
+    if _lock_gated(config, "dhw"):
+        changes["dhw_setpoint"] = _bounded(inp, "dhw_setpoint", float(inp.params.dhw_setpoint))
+    if _lock_gated(config, "space") and not space_runs:
+        changes["space_setpoint"] = None
+    if _lock_gated(config, "space") and _lock_gated(config, "dhw"):
+        changes["mode"] = None
+    return replace(command, **changes)
+
+
+def _row(coord: Any, inp: ArbiterInputs, duty: str | None, now: datetime) -> PumpCommand:
+    """The set-point gate's row of the module table for ``duty``."""
     result = inp.plan
     mode_state = _slot_state(inp, "mode")
     dhw = _bounded(inp, "dhw_setpoint", float(inp.params.dhw_setpoint))
-    if pump_mode.capability(getattr(mode_state, "state", None)).cooling:
-        # Cooling is the user's season, not a duty the plan chose: hands off,
-        # the silent switch included.
-        return PumpCommand(None, None, None)
     silent = _silent_target(coord, inp, now)
     both = pump_mode.MODE_HEAT_DHW if _option_for(mode_state, pump_mode.MODE_HEAT_DHW) else None
     if duty == "space" and inp.disinfecting:
@@ -1241,7 +1310,7 @@ def _differs(slot: str, observed: Any, value: Any) -> bool:
         return int(observed) != int(value)
     if slot == "mode":
         return bool(pump_mode.resolve(observed) != value)
-    if slot == "silent":
+    if slot in _SWITCH_SLOTS:
         return bool(observed is not value)
     if observed is None or value is None:
         return False
@@ -1262,7 +1331,7 @@ def _observed(inp: ArbiterInputs, slot: str) -> Any:
     if slot == "mode":
         raw = getattr(inp.hass.states.get(entity) if entity else None, "state", None)
         return raw if pump_mode.resolve(raw) is not None else None
-    if slot == "silent":
+    if slot in _SWITCH_SLOTS:
         raw = getattr(inp.hass.states.get(entity) if entity else None, "state", None)
         if raw == "on":
             return True
@@ -1322,7 +1391,7 @@ def _service(slot: str, state: Any, value: Any) -> tuple[str, dict[str, Any]] | 
     """
     if slot == "mode":
         return "select_option", {"option": _option_for(state, value)}
-    if slot == "silent":
+    if slot in _SWITCH_SLOTS:
         return ("turn_on" if value else "turn_off"), {}
     if slot in _NIGHT_KEYS:
         return "set_value", {"value": int(value)}
@@ -1355,6 +1424,8 @@ async def _write(coord: Any, inp: ArbiterInputs, slot: str, value: Any, now: dat
         _LOGGER.warning("Pump duty: writing %s to %s failed: %s", value, entity, err)
         return
     held.written[slot] = (int(value) if slot in _NIGHT_KEYS else value, now)
+    if slot in ("space_lock", "dhw_lock"):
+        held.locks[slot] = (entity, bool(_lock_value(inp.config, slot.removesuffix("_lock"), True)))
     await _persist(coord)
 
 
@@ -1453,6 +1524,9 @@ async def apply(coord: Any, now: datetime | None = None) -> None:
     mode = duty_mode(coord.arbiter_inputs().config)
     if mode == DUTY_OFF:
         release_listeners(coord)
+        async with held.lock:
+            await _load(coord)
+            await _release_locks(coord, coord.arbiter_inputs())
         return
     async with held.lock:
         await _load(coord)
@@ -1467,6 +1541,9 @@ async def _arbitrate(coord: Any, held: ArbiterState, inp: ArbiterInputs, mode: s
     if inp.mode == MODE_OFF or mode != DUTY_CONTROL:
         # Off writes nothing, not even the baseline (tvofi, 2026-09-26): the
         # pump is the person's the moment the optimizer lets go of it.
+        # A lock is the one write let go of: left blocking, it would keep
+        # the duty off for the person taking the pump back.
+        await _release_locks(coord, inp)
         if held.written or held.retry:
             # A pending retry dies with control, and so does its warning.
             _forget(held)
@@ -1483,12 +1560,42 @@ async def _arbitrate(coord: Any, held: ArbiterState, inp: ArbiterInputs, mode: s
     if mode != DUTY_CONTROL or _pump_off(inp):
         return
     hold(coord, now)
+    await _release_locks(coord, inp, stale_only=True)
     await _command(
         coord, inp,
         desired(coord, inp, _without_block(coord, _share(coord, inp, duty, now), now), now),
         now,
     )
     await _write_night_schedule(coord, inp, now)
+
+
+async def _release_locks(coord: Any, inp: ArbiterInputs, *, stale_only: bool = False) -> None:
+    """Switch each lock written to the state that lets its duty run.
+
+    ``stale_only`` keeps a lock the configuration still gates the same way
+    (same switch, same polarity): only one whose gate was changed back, or
+    whose switch was swapped, is released. A failed write is kept and tried
+    on the next pass.
+    """
+    held = state_for(coord)
+    released = False
+    for slot, (entity, allow) in list(held.locks.items()):
+        duty = slot.removesuffix("_lock")
+        if stale_only and _entities(inp.config)[slot] == entity and _lock_value(inp.config, duty, True) == allow:
+            continue
+        domain, service = on_off_service(entity, allow)
+        try:
+            await inp.hass.services.async_call(domain, service, {"entity_id": entity}, blocking=True)
+        except Exception as err:  # noqa: BLE001 - retried on the next pass
+            log_held(inp.hass, f"lock_release:{entity}", True,
+                     "Pump duty: releasing %s failed: %s; retrying", entity, err)
+            continue
+        log_held(inp.hass, f"lock_release:{entity}", False)
+        del held.locks[slot]
+        held.written.pop(slot, None)
+        released = True
+    if released:
+        await _persist(coord)
 
 
 def _share(coord: Any, inp: ArbiterInputs, duty: str | None, now: datetime) -> str | None:
@@ -1656,6 +1763,7 @@ async def release(coord: Any) -> None:
     inp = coord.arbiter_inputs()
     if held.written and duty_mode(inp.config) == DUTY_CONTROL and inp.mode != MODE_OFF:
         await _command(coord, inp, desired(coord, inp, None, dt_util.now()), dt_util.now())
+    await _release_locks(coord, inp)
 
 
 def release_listeners(coord: Any) -> None:
@@ -1700,6 +1808,7 @@ async def _persist(coord: Any) -> None:
     held = state_for(coord)
     payload = {
         "written": {k: [v, at.isoformat()] for k, (v, at) in held.written.items()},
+        "locks": {k: [entity, allow] for k, (entity, allow) in held.locks.items()},
     }
     try:
         await _store(coord).async_save(payload)
@@ -1726,6 +1835,17 @@ async def _load(coord: Any) -> None:
             continue
         if at is not None and _writable(slot, value):
             held.written[slot] = (value, at)
+    held.locks.update(_restored_locks(raw.get("locks")))
+
+
+def _restored_locks(raw: Any) -> dict[str, tuple[str, bool]]:
+    """The persisted lock record, each row of any other shape dropped."""
+    rows = raw.items() if isinstance(raw, dict) else ()
+    return {
+        slot: (pair[0], pair[1]) for slot, pair in rows
+        if slot in ("space_lock", "dhw_lock") and isinstance(pair, list) and len(pair) == 2
+        and isinstance(pair[0], str) and isinstance(pair[1], bool)
+    }
 
 
 def _writable(slot: str, value: Any) -> bool:
@@ -1736,7 +1856,7 @@ def _writable(slot: str, value: Any) -> bool:
     """
     if slot == "mode":
         return isinstance(value, str) and value in _OWN_MODES
-    if slot == "silent":
+    if slot in _SWITCH_SLOTS:
         return value is True or value is False
     if slot in _NIGHT_KEYS:
         return isinstance(value, int) and not isinstance(value, bool)

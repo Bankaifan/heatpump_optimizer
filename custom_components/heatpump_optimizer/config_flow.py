@@ -398,6 +398,12 @@ from .const import (
     CONF_PUMP_DUTY_MODE,
     DEFAULT_PUMP_DUTY_MODE,
     PUMP_DUTY_MODES,
+    CONF_SPACE_GATE,
+    CONF_DHW_GATE,
+    CONF_SPACE_LOCK_ENTITY,
+    CONF_DHW_LOCK_ENTITY,
+    DUTY_GATES,
+    DEFAULT_DUTY_GATE,
     CONF_MOLD_GUARD_ENABLED,
     DEFAULT_MOLD_GUARD_ENABLED,
     CONF_INDOOR_HUMIDITY_ENTITY,
@@ -1692,6 +1698,12 @@ _OPTION_FIELDS: Final[tuple[_F, ...]] = (
     # -- entities_pump
     _F("entities_pump", CONF_HEAT_PUMP_MODE_ENTITY, _STORED, _entity_of(list(topology.ASSIGNABLE_KEYS[CONF_HEAT_PUMP_MODE_ENTITY]))),
     _F("entities_pump", CONF_PUMP_DUTY_MODE, DEFAULT_PUMP_DUTY_MODE, _select(list(PUMP_DUTY_MODES), 'pump_duty_mode')),
+    # How control gates each duty off, per duty (pump_arbiter.py), with the
+    # lock switch a switch gate holds.
+    _F("entities_pump", CONF_SPACE_GATE, DEFAULT_DUTY_GATE, _select(list(DUTY_GATES), 'duty_gate')),
+    _F("entities_pump", CONF_SPACE_LOCK_ENTITY, _STORED, _entity_of(['switch', 'input_boolean'])),
+    _F("entities_pump", CONF_DHW_GATE, DEFAULT_DUTY_GATE, _select(list(DUTY_GATES), 'duty_gate')),
+    _F("entities_pump", CONF_DHW_LOCK_ENTITY, _STORED, _entity_of(['switch', 'input_boolean'])),
     _F("entities_pump", CONF_HEAT_PUMP_DEFROST_ENTITY, _STORED, _entity_of(list(topology.ASSIGNABLE_KEYS[CONF_HEAT_PUMP_DEFROST_ENTITY]))),
     _F("entities_pump", CONF_HEAT_PUMP_ONLINE_ENTITY, _STORED, _entity_of(list(topology.ASSIGNABLE_KEYS[CONF_HEAT_PUMP_ONLINE_ENTITY]))),
     _F("entities_pump", CONF_HEAT_PUMP_FAULT_ENTITY, _STORED, _entity_of(list(topology.ASSIGNABLE_KEYS[CONF_HEAT_PUMP_FAULT_ENTITY]))),
@@ -2288,6 +2300,8 @@ _WRITTEN_ENTITY_KEYS = (
     CONF_MIXING_VALVE_WRITE_ENTITY,
     CONF_COMPRESSOR_FREQ_ENTITY,
     CONF_HEAT_PUMP_MODE_ENTITY,
+    CONF_SPACE_LOCK_ENTITY,
+    CONF_DHW_LOCK_ENTITY,
 )
 
 

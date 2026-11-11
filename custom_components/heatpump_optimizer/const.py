@@ -979,6 +979,17 @@ DEFAULT_DHW_DISINFECTION_MODE: Final = "observe"
 CONF_PUMP_DUTY_MODE: Final = "pump_duty_mode"
 DEFAULT_PUMP_DUTY_MODE: Final = "off"
 PUMP_DUTY_MODES: Final = ("off", "observe", "control")
+#: How control gates each duty off (pump_arbiter.py), chosen per duty because
+#: a pump may offer a lock for one and only a set-point for the other.
+#: ``setpoint`` (the default) is the existing gate: the mode select where it
+#: offers a single duty, else the other duty's set-point lowered. ``lock``
+#: holds the duty's switch ON to block it; ``release`` holds it ON to allow it.
+CONF_SPACE_GATE: Final = "space_gate"
+CONF_DHW_GATE: Final = "dhw_gate"
+CONF_SPACE_LOCK_ENTITY: Final = "space_lock_entity"
+CONF_DHW_LOCK_ENTITY: Final = "dhw_lock_entity"
+DUTY_GATES: Final = ("setpoint", "lock", "release")
+DEFAULT_DUTY_GATE: Final = "setpoint"
 #: How long a switch the optimizer turned on may stay unreadable before its
 #: record is dropped with a repair, when it is no longer the configured
 #: switch or has no state at all (renamed or deleted). Not immediate: at

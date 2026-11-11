@@ -4449,6 +4449,9 @@ async def registry_walk_recurses():
         # #1067 again: the pump's own supply and return water, same page.
         const.CONF_HEAT_PUMP_SUPPLY_TEMP_ENTITY,
         const.CONF_HEAT_PUMP_RETURN_TEMP_ENTITY,
+        # Each duty's lock switch.
+        const.CONF_SPACE_LOCK_ENTITY,
+        const.CONF_DHW_LOCK_ENTITY,
     }
     check(
         "registry",

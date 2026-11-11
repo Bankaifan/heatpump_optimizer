@@ -656,6 +656,10 @@ are on **Power and solar sensors**; mode / defrost / online / fault are on
 |---|---|---|---|
 | Heat pump operating mode | from setup | the pump's mode entity | Read only unless **Pump duty control** is set to Control. Left empty, the optimizer assumes the pump can do everything. |
 | Pump duty control | Off | Off / Observe / Control | Whether the optimizer tells the pump which duty to serve on each plan step. See [Pump duty control](#pump-duty-control) below. |
+| How control blocks space heating | Set-point (mode or lowered set-point) | Set-point / Lock switch / Release switch | With *Control*: block heating through the mode or the lowered set-point, or with the switch below. See [Pump duty control](#pump-duty-control). |
+| Space heating lock switch | none | `switch` / `input_boolean` | The switch a *Lock switch* (on blocks) or *Release switch* (on allows) gate holds. |
+| How control blocks hot water | Set-point (mode or lowered set-point) | Set-point / Lock switch / Release switch | The same choice for hot water. |
+| Hot water lock switch | none | `switch` / `input_boolean` | The switch the hot water gate holds. |
 | Defrosting | from setup | a binary sensor | On while the pump reverses to melt frost off the outdoor coil. |
 | Pump online | from setup | a binary sensor | On while the pump is actually reachable. |
 | Fault alarm | from setup | a binary sensor | On while the pump is reporting a fault. Only whether there is a fault is used. |
@@ -843,6 +847,18 @@ writes, at every 15-minute plan step:
   reads off, nothing is compared or written: switched off, a pump can report
   set-points of its own (a Tuya pump reads 25 °C). Once it is on, a reset that
   is still there is written back like any other difference.
+- **A lock switch per duty.** *How control blocks space heating* and *How
+  control blocks hot water* each default to *Set-point* (everything above).
+  *Lock switch* (on blocks) or *Release switch* (on allows) gates that duty
+  with the switch picked beside it (*Space heating lock switch*, *Hot water
+  lock switch*) instead: it is held blocking on every step that does not
+  serve the duty, idle included, and that duty's set-point is never lowered
+  to a gate — the hot water one keeps the configured set-point, so the
+  pump's own thermostat cannot reheat a tank the plan leaves alone. With
+  both duties on switches the operating mode is not written. Whenever
+  control lets go (Optimizer active or Pump duty control off, the gate or
+  switch changed, a reload, the pump cooling) each lock it wrote is switched
+  back to allowing.
 - **Its own mode is not a pump limit.** A mode the optimizer wrote does not
   stop the next plan from heating the house or making hot water, even when the
   pump has not shown it yet or after a restart; one set by anybody else

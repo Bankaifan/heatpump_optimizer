@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 
 sys.path.insert(0, "tests")
@@ -497,7 +498,135 @@ def main() -> int:
         lambda: arb._without_block(both_off, "both", NOW) == "idle",
     )
 
+    gate_checks()
     return R.close("BLOCK DUTY CHECKS")
+
+
+def _gate_snap(config, *, duty_state=None, action=None, disinfecting=False, mode_options=None):
+    """A control snapshot over a DHW number, two lock switches and a mode select."""
+    states = {
+        "number.dhw": FakeState("55", attributes={"min": 30, "max": 65, "step": 1}),
+        "switch.heat_lock": FakeState("off"),
+        "switch.dhw_lock": FakeState("off"),
+    }
+    if mode_options is not None:
+        states["select.mode"] = FakeState("Heating + DHW", attributes={"options": mode_options})
+        config = {"heat_pump_mode_entity": "select.mode", **config}
+    snap = _snap(
+        config={"pump_duty_mode": "control", "dhw_setpoint_entity": "number.dhw", **config},
+        params=SimpleNamespace(dhw_setpoint=55.0, dhw_legionella_temp=60.0,
+                               dhw_min_temp=40.0, dhw_demand_windows=[]),
+        action=action, disinfecting=disinfecting,
+    )
+    return replace(snap, hass=FakeHass(states))
+
+
+def gate_checks() -> None:
+    """Lock-switch gates: polarity, the rows they change, and every release."""
+    locks = {"space_gate": "lock", "space_lock_entity": "switch.heat_lock",
+             "dhw_gate": "release", "dhw_lock_entity": "switch.dhw_lock"}
+    check(
+        "a lock gate blocks while on, a release gate allows while on, setpoint has none",
+        lambda: arb._lock_value(locks, "space", True) is False
+        and arb._lock_value(locks, "space", False) is True
+        and arb._lock_value(locks, "dhw", True) is True
+        and arb._lock_value(locks, "dhw", False) is False
+        and arb._lock_value({}, "dhw", False) is None
+        and arb._lock_value({"dhw_gate": "lock"}, "dhw", False) is None,
+    )
+    dhw_lock = {"dhw_gate": "lock", "dhw_lock_entity": "switch.dhw_lock"}
+    snap = _gate_snap(dhw_lock)
+    idle = arb.desired(_Coord(snap), snap, "idle", NOW)
+    space = arb.desired(_Coord(snap), snap, "space", NOW)
+    dhw = arb.desired(_Coord(snap), snap, "dhw", NOW)
+    base = arb.desired(_Coord(snap), snap, None, NOW)
+    check(
+        "a switch-gated hot water duty is locked on idle and space steps, free on its own and the baseline",
+        lambda: idle.dhw_lock is True and space.dhw_lock is True
+        and dhw.dhw_lock is False and base.dhw_lock is False
+        and idle.space_lock is None,
+    )
+    check(
+        "a switch-gated hot water set-point holds the configured value, never the gate",
+        lambda: space.dhw_setpoint == 55.0 and idle.dhw_setpoint == 55.0,
+    )
+    plain = _gate_snap({})
+    check(
+        "the set-point gate still lowers hot water on a space step without a heating-only mode",
+        lambda: arb.desired(_Coord(plain), plain, "space", NOW).dhw_setpoint == 30.0
+        and arb.desired(_Coord(plain), plain, "space", NOW).dhw_lock is None,
+    )
+    options = ["Heating", "DHW", "Heating + DHW"]
+    both_locks = _gate_snap(locks, mode_options=options)
+    one_lock = _gate_snap(dhw_lock, mode_options=options)
+    check(
+        "two switch gates leave the mode alone; one still writes it",
+        lambda: arb.desired(_Coord(both_locks), both_locks, "space", NOW).mode is None
+        and arb.desired(_Coord(both_locks), both_locks, "space", NOW).space_lock is False
+        and arb.desired(_Coord(both_locks), both_locks, "dhw", NOW).space_lock is True
+        and arb.desired(_Coord(one_lock), one_lock, "space", NOW).mode is not None,
+    )
+    disinfect = _gate_snap(dhw_lock, disinfecting=True)
+    check(
+        "a held disinfection cycle frees a switch-gated hot water duty on a space step",
+        lambda: arb.desired(_Coord(disinfect), disinfect, "space", NOW).dhw_lock is False,
+    )
+    releasing = _gate_snap(dhw_lock)
+    rel_coord = _Coord(releasing)
+    rel_held = arb.state_for(rel_coord)
+    rel_held.written["dhw_lock"] = (True, NOW)
+    rel_held.locks["dhw_lock"] = ("switch.dhw_lock", False)
+    off = replace(releasing, config={**releasing.config, "pump_duty_mode": "observe"})
+    rel_coord._snap = off
+    asyncio.run(arb._arbitrate(rel_coord, rel_held, off, "observe", NOW))
+    check(
+        "letting go of control writes a held lock back to allowing, and forgets it",
+        lambda: ("switch", "turn_off", {"entity_id": "switch.dhw_lock"}) in off.hass.services.calls
+        and rel_held.written == {} and rel_held.locks == {},
+    )
+    gone = _gate_snap({})  # the gate was set back to setpoint
+    gone_coord = _Coord(gone)
+    gone_held = arb.state_for(gone_coord)
+    gone_held.locks["space_lock"] = ("switch.heat_lock", True)
+    asyncio.run(arb._release_locks(gone_coord, gone, stale_only=True))
+    same = _gate_snap(dhw_lock)
+    same_coord = _Coord(same)
+    arb.state_for(same_coord).locks["dhw_lock"] = ("switch.dhw_lock", False)
+    asyncio.run(arb._release_locks(same_coord, same, stale_only=True))
+    check(
+        "a lock whose gate was changed is released by its record; one still gated is kept",
+        lambda: ("switch", "turn_on", {"entity_id": "switch.heat_lock"}) in gone.hass.services.calls
+        and gone_held.locks == {}
+        and same.hass.services.calls == [] and "dhw_lock" in arb.state_for(same_coord).locks,
+    )
+    write_coord = _Coord(same)
+    asyncio.run(arb._write(write_coord, same, "dhw_lock", True, NOW))
+    check(
+        "writing a lock records its switch and the state that allows it, and restores",
+        lambda: arb.state_for(write_coord).locks == {"dhw_lock": ("switch.dhw_lock", False)}
+        and arb._restored_locks({"dhw_lock": ["switch.dhw_lock", False], "mode": ["x", True],
+                                 "space_lock": ["switch.y", "on"]})
+        == {"dhw_lock": ("switch.dhw_lock", False)}
+        and arb._writable("dhw_lock", True) and not arb._writable("dhw_lock", 1.0),
+    )
+    cooling = _gate_snap(dhw_lock, mode_options=["Cool + DHW"])
+    cooling.hass.states.set("select.mode", FakeState("Cool + DHW", attributes={"options": ["Cool + DHW"]}))
+    cool = arb.desired(_Coord(cooling), cooling, "idle", NOW)
+    check(
+        "cooling writes nothing but each lock allowing",
+        lambda: cool.dhw_lock is False and cool.mode is None and cool.dhw_setpoint is None,
+    )
+    check(
+        "a held disinfection cycle keeps a switch-gated hot water duty free on an idle step",
+        lambda: arb.desired(_Coord(disinfect), disinfect, "idle", NOW).dhw_lock is False,
+    )
+    space_lock = _gate_snap({"space_gate": "lock", "space_lock_entity": "switch.heat_lock",
+                             "space_setpoint_entity": "number.dhw"})
+    check(
+        "a switch-gated space duty writes no space set-point on a step that does not heat",
+        lambda: arb.desired(_Coord(space_lock), space_lock, "dhw", NOW).space_setpoint is None
+        and arb.desired(_Coord(space_lock), space_lock, "dhw", NOW).space_lock is True,
+    )
 
 
 if __name__ == "__main__":
