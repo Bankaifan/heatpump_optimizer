@@ -483,10 +483,15 @@ DOMAINS: dict[str, dict[str, Domain | str]] = {
         # The silent switch (#1911) and the GCHV night-mode registers (#1913)
         # are held slots on the same record (``pump_arbiter._writable``).
         "written/silent/0": _FLAG,
+        # Each duty's lock switch, and the record a lock is released by: its
+        # entity and the state that allows the duty.
+        **{f"written/{d}_lock/0": _FLAG for d in ("space", "dhw")},
+        **{f"locks/{d}_lock/0": _TEXT for d in ("space", "dhw")},
+        **{f"locks/{d}_lock/1": _FLAG for d in ("space", "dhw")},
         **{f"written/night_{e}_hour/0": Domain("int", 0, 23) for e in ("start", "end")},
         **{f"written/night_{e}_minute/0": Domain("int", 0, 59) for e in ("start", "end")},
         **{f"written/{k}/1": _AT for k in (
-            "mode", "dhw_setpoint", "space_setpoint", "silent",
+            "mode", "dhw_setpoint", "space_setpoint", "silent", "space_lock", "dhw_lock",
             "night_start_hour", "night_start_minute", "night_end_hour", "night_end_minute",
         )},
     },

@@ -65243,6 +65243,9 @@ _P6_READ_ONLY = {
         "heat_pump_dhw_booster_entity", "heat_pump_fault_entity",
         "heat_pump_online_entity",
     )},
+    **{key: "the pump's own start hysteresis, read_hysteresis_k reads it" for key in (
+        hp_const.CONF_SPACE_HYSTERESIS_ENTITY, hp_const.CONF_DHW_HYSTERESIS_ENTITY,
+    )},
 }
 
 
@@ -65345,8 +65348,19 @@ async def _p6_heat_curve(eid):
     return coord.hass.services.calls
 
 
+async def _p6_lock(eid):
+    duty = "space" if "space_lock" in eid else "dhw"
+    coord = _PaCoord(_PA_TUYA)
+    with_config(coord, {f"{duty}_gate": "lock", f"{duty}_lock_entity": eid})
+    coord.hass.states._states[eid] = FakeState("on")
+    await _pa.apply(coord, _PA_T0 + timedelta(minutes=1))
+    return coord.hass.services.calls
+
+
 #: Every slot a consumer writes, and that consumer, driven for real.
 _P6_WRITERS = {
+    hp_const.CONF_SPACE_LOCK_ENTITY: _p6_lock,
+    hp_const.CONF_DHW_LOCK_ENTITY: _p6_lock,
     hp_const.CONF_HEAT_CURVE_DISPLACE_ENTITY: _p6_heat_curve,
     hp_const.CONF_HEAT_PUMP_SWITCH_ENTITY: _p6_switch,
     hp_const.CONF_SPACE_PUMP_ENTITY: _p6_pump,
@@ -81026,9 +81040,10 @@ R.check(
 _sa_record = {"written": {
     **{slot: [v, _SA_T0.isoformat()] for slot, v in (
         ("mode", "Heating"), ("dhw_setpoint", 50.0), ("space_setpoint", 35.0), ("silent", True),
+        ("space_lock", True), ("dhw_lock", False),
         ("night_start_hour", 22), ("night_start_minute", 0), ("night_end_hour", 6), ("night_end_minute", 30),
     )},
-}}
+}, "locks": {"space_lock": ["switch.heat_lock", False], "dhw_lock": ["switch.dhw_lock", True]}}
 R.check(
     "every slot the pump arbiter persists is declared in the pump_duty store domain",
     sorted(_sa_record["written"]) == sorted(_sa_pa._SLOTS + _sa_pa._NIGHT_SLOTS)

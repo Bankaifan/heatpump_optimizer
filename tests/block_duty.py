@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 
 sys.path.insert(0, "tests")
@@ -497,7 +498,221 @@ def main() -> int:
         lambda: arb._without_block(both_off, "both", NOW) == "idle",
     )
 
+    gate_checks()
     return R.close("BLOCK DUTY CHECKS")
+
+
+def _gate_snap(config, *, duty_state=None, action=None, disinfecting=False, mode_options=None):
+    """A control snapshot over a DHW number, two lock switches and a mode select."""
+    states = {
+        "number.dhw": FakeState("55", attributes={"min": 30, "max": 65, "step": 1}),
+        "switch.heat_lock": FakeState("off"),
+        "switch.dhw_lock": FakeState("off"),
+        "sensor.dhw_hyst": FakeState("4", unit="K"),
+        "sensor.heat_hyst": FakeState("2", unit="K"),
+    }
+    if mode_options is not None:
+        states["select.mode"] = FakeState("Heating + DHW", attributes={"options": mode_options})
+        config = {"heat_pump_mode_entity": "select.mode", **config}
+    snap = _snap(
+        config={"pump_duty_mode": "control", "dhw_setpoint_entity": "number.dhw", **config},
+        params=SimpleNamespace(dhw_setpoint=55.0, dhw_legionella_temp=60.0,
+                               dhw_min_temp=40.0, dhw_demand_windows=[]),
+        action=action, disinfecting=disinfecting,
+    )
+    return replace(snap, hass=FakeHass(states))
+
+
+def gate_checks() -> None:
+    """Lock-switch gates, the hysteresis readings and the disinfection set-point."""
+    locks = {"space_gate": "lock", "space_lock_entity": "switch.heat_lock",
+             "dhw_gate": "release", "dhw_lock_entity": "switch.dhw_lock"}
+    check(
+        "a lock gate blocks while on, a release gate allows while on, setpoint has none",
+        lambda: arb._lock_value(locks, "space", True) is False
+        and arb._lock_value(locks, "space", False) is True
+        and arb._lock_value(locks, "dhw", True) is True
+        and arb._lock_value(locks, "dhw", False) is False
+        and arb._lock_value({}, "dhw", False) is None
+        and arb._lock_value({"dhw_gate": "lock"}, "dhw", False) is None,
+    )
+    dhw_lock = {"dhw_gate": "lock", "dhw_lock_entity": "switch.dhw_lock"}
+    snap = _gate_snap(dhw_lock)
+    idle = arb.desired(_Coord(snap), snap, "idle", NOW)
+    space = arb.desired(_Coord(snap), snap, "space", NOW)
+    dhw = arb.desired(_Coord(snap), snap, "dhw", NOW)
+    base = arb.desired(_Coord(snap), snap, None, NOW)
+    check(
+        "a switch-gated hot water duty is locked on idle and space steps, free on its own and the baseline",
+        lambda: idle.dhw_lock is True and space.dhw_lock is True
+        and dhw.dhw_lock is False and base.dhw_lock is False
+        and idle.space_lock is None,
+    )
+    check(
+        "a switch-gated hot water set-point holds the configured value, never the gate",
+        lambda: space.dhw_setpoint == 55.0 and idle.dhw_setpoint == 55.0,
+    )
+    plain = _gate_snap({})
+    check(
+        "the set-point gate still lowers hot water on a space step without a heating-only mode",
+        lambda: arb.desired(_Coord(plain), plain, "space", NOW).dhw_setpoint == 30.0
+        and arb.desired(_Coord(plain), plain, "space", NOW).dhw_lock is None,
+    )
+    options = ["Heating", "DHW", "Heating + DHW"]
+    both_locks = _gate_snap(locks, mode_options=options)
+    one_lock = _gate_snap(dhw_lock, mode_options=options)
+    check(
+        "two switch gates leave the mode alone; one still writes it",
+        lambda: arb.desired(_Coord(both_locks), both_locks, "space", NOW).mode is None
+        and arb.desired(_Coord(both_locks), both_locks, "space", NOW).space_lock is False
+        and arb.desired(_Coord(both_locks), both_locks, "dhw", NOW).space_lock is True
+        and arb.desired(_Coord(one_lock), one_lock, "space", NOW).mode is not None,
+    )
+    disinfect = _gate_snap(dhw_lock, disinfecting=True)
+    check(
+        "a held disinfection cycle frees a switch-gated hot water duty on a space step",
+        lambda: arb.desired(_Coord(disinfect), disinfect, "space", NOW).dhw_lock is False,
+    )
+    legionella = _gate_snap({}, action={"dhw_reason": "legionella"})
+    held = _gate_snap({}, disinfecting=True)
+    check(
+        "a commanded or held disinfection cycle writes its temperature, not the configured set-point",
+        lambda: arb.desired(_Coord(legionella), legionella, "dhw", NOW).dhw_setpoint == 60.0
+        and arb.desired(_Coord(held), held, "both", NOW).dhw_setpoint == 60.0
+        and arb.desired(_Coord(plain), plain, "dhw", NOW).dhw_setpoint == 55.0,
+    )
+    releasing = _gate_snap(dhw_lock)
+    rel_coord = _Coord(releasing)
+    rel_held = arb.state_for(rel_coord)
+    rel_held.written["dhw_lock"] = (True, NOW)
+    rel_held.locks["dhw_lock"] = ("switch.dhw_lock", False)
+    off = replace(releasing, config={**releasing.config, "pump_duty_mode": "observe"})
+    rel_coord._snap = off
+    asyncio.run(arb._arbitrate(rel_coord, rel_held, off, "observe", NOW))
+    check(
+        "letting go of control writes a held lock back to allowing, and forgets it",
+        lambda: ("switch", "turn_off", {"entity_id": "switch.dhw_lock"}) in off.hass.services.calls
+        and rel_held.written == {} and rel_held.locks == {},
+    )
+    gone = _gate_snap({})  # the gate was set back to setpoint
+    gone_coord = _Coord(gone)
+    gone_held = arb.state_for(gone_coord)
+    gone_held.locks["space_lock"] = ("switch.heat_lock", True)
+    asyncio.run(arb._release_locks(gone_coord, gone, stale_only=True))
+    same = _gate_snap(dhw_lock)
+    same_coord = _Coord(same)
+    arb.state_for(same_coord).locks["dhw_lock"] = ("switch.dhw_lock", False)
+    asyncio.run(arb._release_locks(same_coord, same, stale_only=True))
+    check(
+        "a lock whose gate was changed is released by its record; one still gated is kept",
+        lambda: ("switch", "turn_on", {"entity_id": "switch.heat_lock"}) in gone.hass.services.calls
+        and gone_held.locks == {}
+        and same.hass.services.calls == [] and "dhw_lock" in arb.state_for(same_coord).locks,
+    )
+    write_coord = _Coord(same)
+    asyncio.run(arb._write(write_coord, same, "dhw_lock", True, NOW))
+    check(
+        "writing a lock records its switch and the state that allows it, and restores",
+        lambda: arb.state_for(write_coord).locks == {"dhw_lock": ("switch.dhw_lock", False)}
+        and arb._restored_locks({"dhw_lock": ["switch.dhw_lock", False], "mode": ["x", True],
+                                 "space_lock": ["switch.y", "on"]})
+        == {"dhw_lock": ("switch.dhw_lock", False)}
+        and arb._writable("dhw_lock", True) and not arb._writable("dhw_lock", 1.0),
+    )
+    cooling = _gate_snap(dhw_lock, mode_options=["Cool + DHW"])
+    cooling.hass.states.set("select.mode", FakeState("Cool + DHW", attributes={"options": ["Cool + DHW"]}))
+    cool = arb.desired(_Coord(cooling), cooling, "idle", NOW)
+    check(
+        "cooling writes nothing but each lock allowing",
+        lambda: cool.dhw_lock is False and cool.mode is None and cool.dhw_setpoint is None,
+    )
+    check(
+        "a held disinfection cycle keeps a switch-gated hot water duty free on an idle step",
+        lambda: arb.desired(_Coord(disinfect), disinfect, "idle", NOW).dhw_lock is False,
+    )
+    space_lock = _gate_snap({"space_gate": "lock", "space_lock_entity": "switch.heat_lock",
+                             "space_setpoint_entity": "number.dhw"})
+    check(
+        "a switch-gated space duty writes no space set-point on a step that does not heat",
+        lambda: arb.desired(_Coord(space_lock), space_lock, "dhw", NOW).space_setpoint is None
+        and arb.desired(_Coord(space_lock), space_lock, "dhw", NOW).space_lock is True,
+    )
+    ledger = _gate_snap({"dhw_hysteresis_entity": "sensor.dhw_hyst"}, action={"dhw_reason": "legionella"})
+    ledger_held = arb.ArbiterState()
+    arb._observe(ledger_held, ledger, "dhw", NOW)
+    check(
+        "the ledger's start temperature is the configured set-point less the hysteresis",
+        lambda: ledger_held.step["start_c"] == 51.0,
+    )
+    off_snap = replace(_gate_snap(dhw_lock), config={**dhw_lock, "pump_duty_mode": "off"})
+    off_coord = _Coord(off_snap)
+    arb.state_for(off_coord).loaded = True
+    arb.state_for(off_coord).locks["dhw_lock"] = ("switch.dhw_lock", False)
+    asyncio.run(arb.apply(off_coord, NOW))
+    check(
+        "switching Pump duty control off releases a lock it wrote",
+        lambda: ("switch", "turn_off", {"entity_id": "switch.dhw_lock"}) in off_snap.hass.services.calls,
+    )
+    hyst = FakeHass({
+        "sensor.k": FakeState("2", unit="K"),
+        "sensor.f": FakeState("9", unit="°F"),
+        "sensor.big": FakeState("25"),
+        "sensor.neg": FakeState("-1"),
+        "sensor.na": FakeState("unavailable"),
+    })
+    check(
+        "a hysteresis reads as a difference: K as it stands, °F scaled, nonsense refused",
+        lambda: arb.read_hysteresis_k(hyst, "sensor.k") == 2.0
+        and abs(arb.read_hysteresis_k(hyst, "sensor.f") - 5.0) < 1e-9
+        and arb.read_hysteresis_k(hyst, "sensor.big") is None
+        and arb.read_hysteresis_k(hyst, "sensor.neg") is None
+        and arb.read_hysteresis_k(hyst, "sensor.na") is None
+        and arb.read_hysteresis_k(hyst, None) is None,
+    )
+    lift = _gate_snap({"space_hysteresis_entity": "sensor.heat_hyst", "flow_min_lift_k": 0.5})
+    check(
+        "the heating floor's lift is never below the pump's own heating hysteresis",
+        lambda: arb._start_lift_k(lift) == 2.0
+        and arb._start_lift_k(_gate_snap({"flow_min_lift_k": 0.5})) == 0.5,
+    )
+    row = {"start": NOW, "planned": "dhw", "tank": 52.0, "measured": True, "ran": False,
+           "dhw_mode": False, "start_c": 51.0}
+    check(
+        "an idle hot water step on a tank above the start temperature is not-startable",
+        lambda: arb._verdict(row, 52.0)["verdict"] == "not-startable"
+        and arb._verdict({**row, "tank": 50.0}, 50.0)["verdict"] == "idle-instead"
+        and arb._verdict({**row, "start_c": None}, 52.0)["verdict"] == "idle-instead",
+    )
+    import numpy as np
+    from heatpump_optimizer.dhw_planner import drop_unstartable_dhw
+
+    def temps(plan):
+        # 1 K lost per step, 3 K gained per charging step, from 54 degC.
+        out = [54.0]
+        for p in plan:
+            out.append(out[-1] - 1.0 + (3.0 if p > 0 else 0.0))
+        return np.array(out)
+
+    plan = np.array([1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+    state = SimpleNamespace(dhw_start_hysteresis_k=4.0)
+    kept = drop_unstartable_dhw(plan, state, 55.0, None, temps)
+    check(
+        "a charge begun above set-point minus hysteresis is dropped, the first step and a cooled tank kept",
+        lambda: list(kept) == [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    )
+    edge_state = SimpleNamespace(dhw_start_hysteresis_k=3.0)  # start below 52; step 2 opens at exactly 52
+    check(
+        "a tank exactly at the start temperature does not start",
+        lambda: list(drop_unstartable_dhw(np.array([0.0, 0.0, 1.0]), edge_state, 55.0, None,
+                                          lambda p: np.array([54.0, 53.0, 52.0, 55.0])))
+        == [0.0, 0.0, 0.0],
+    )
+    check(
+        "the disinfection run is kept (the warmer tank then drops the later one), an unset hysteresis drops none",
+        lambda: list(drop_unstartable_dhw(plan, state, 55.0, 3, temps))
+        == [1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        and list(drop_unstartable_dhw(plan, SimpleNamespace(), 55.0, None, temps)) == list(plan),
+    )
 
 
 if __name__ == "__main__":
