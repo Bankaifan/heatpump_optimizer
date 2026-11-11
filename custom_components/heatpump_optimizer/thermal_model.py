@@ -2037,7 +2037,7 @@ def dhw_store_of(p: ThermalParameters) -> DhwStore:
             p.dhw_inlet_reference, False,
         )
     eps = float(p.combi_dhw_effectiveness)
-    eps = min(1.0, eps) if eps >= COMBI_DHW_EFFECTIVENESS_FLOOR else COMBI_DHW_EFFECTIVENESS_FLOOR
+    eps = min(const.COMBI_DHW_EFFECTIVENESS_MAX, eps) if eps >= COMBI_DHW_EFFECTIVENESS_FLOOR else COMBI_DHW_EFFECTIVENESS_FLOOR
     return DhwStore(
         _buffer_capacity(p), p.buffer_tank_heat_loss_coefficient,
         p.buffer_store_volume, min(p.dhw_max_temp, p.buffer_max_temp),

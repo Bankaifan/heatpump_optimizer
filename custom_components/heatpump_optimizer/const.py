@@ -995,6 +995,10 @@ COMBI_TANK_PRESETS: Final[dict[str, CombiTankPreset]] = {
     "external_station": CombiTankPreset(0.75, 0.0),
 }
 COMBI_TANK_CUSTOM: Final = "custom"
+#: Upper bound of the exchanger effectiveness. Above 1 is real: the ratio is
+#: taken against the one tank sensor the optimizer reads, and a stratified
+#: tank releases water warmer than that sensor's reading.
+COMBI_DHW_EFFECTIVENESS_MAX: Final = 1.5
 DEFAULT_DHW_COMBI_TANK_TYPE: Final = "internal_coil"
 DEFAULT_COMBI_DHW_EFFECTIVENESS: Final = COMBI_TANK_PRESETS["internal_coil"].effectiveness
 DEFAULT_COMBI_POTABLE_VOLUME_L: Final = COMBI_TANK_PRESETS["internal_coil"].potable_volume_l
