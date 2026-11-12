@@ -28,7 +28,7 @@ No setting yields a few long runs in the cheap hours. Four causes, each read off
 | P3 | the metered floor in the solve band | `draw_range.py` | `coordinator._solve_band` (`coordinator.py:2442`), unchanged |
 | P4 | duty changes and hot-water charges as part of a run | `dhw_planner.py`; the term is P1's | `_co_optimize`, `_combi_flux_exchange` |
 
-P1 and P2 are best landed together: they move the same three goldens. P4 is part C of R10-DUTY-SWITCH-RESTART-LEARNING and waits for its part A (#3461). `pump_arbiter.py` is not touched by any part.
+P1 and P2 are best landed together: they move the same three goldens. P4's switch price is the planned item R10-DUTY-SWITCH-PLANNER-PRICE and waits for part A (#3461); its hot-water half waits for R10-OUTSIDE-DHW-START-HYSTERESIS (#3440). `pump_arbiter.py` is not touched by any part.
 
 **Engaged.** A solve is engaged when a start has a price (`_effective_cycling_cost() > 0`, `coordinator.py:10477`) or the install cannot duty-cycle (`levels_clamped`, `thermal_model.py:1573`). An unengaged solve takes today's path with a zero start term and is byte-identical: its owner has said a start costs nothing and the probe says a sub-floor average is deliverable.
 
@@ -56,7 +56,7 @@ On a plan whose steps are all off or at the floor or above, this is the integer 
 
 **P3, the floor.** `solve_band` books `min_kw = max(configured, learned floor)`, never above the top. The learned floor is the 10th percentile (`LOW_PERCENTILE`) of the window's running samples whose ask was at or under the floor in force (within `AGREE_TOLERANCE`), once `MIN_SAMPLES` of those exist: the pump was asked for its least and drew more. Restricting to those asks is the guard that matters: a cold week of high asks would otherwise raise the floor to the draw of those. It only raises, and only by more than `AGREE_TOLERANCE`, so a pump that draws what it is asked keeps its figure. It lapses like the ceiling store, is keyed to the configuration like the latch, and stays out where `plan_writes_power()`. It moves the band on engaged solves only; `SolveBand` gains the floor's source and sample count.
 
-**P4, duties and hot water.** The start count takes both series and adds, for each duty change inside a run, that direction's learned stop probability (`Direction.p` while `usable`, #3461), in the order `step_duty` and `_share` serve them (`pump_arbiter.py:492`, `:1680`): a both step is hot water first, so it holds one change into space. `median_off_s` cuts the next step's headroom in `_solve_space` (`optimizer.py:4372`), as the R10 note sketched. The hot-water schedule passes through the same `runs.commit` inside `_build_dhw_requirements` (`dhw_planner.py:951`), accepted only if the planner's own tank walk holds every floor and ceiling the uncommitted plan held; the disinfection step is forced. Where the space plan is known (the `_co_optimize` re-plan and each round of the combi exchange), a charge that begins right after a space run pays only `p(space to hot water)` of a start, so hot water joins the end of a run. On a combi store that is the "one charge": the run is formed and priced on the store's total draw, and the split inside it only chooses the COP curve and the mode written.
+**P4, duties and hot water.** The start count takes both series and adds, for each duty change inside a run, that direction's learned stop probability (`Direction.p` while `usable`, #3461), in the order `step_duty` and `_share` serve them (`pump_arbiter.py:492`, `:1680`): a both step is hot water first, so it holds one change into space. `median_off_s` cuts the next step's headroom in `_solve_space` (`optimizer.py:4372`), as the R10 note sketched. The hot-water schedule passes through the same `runs.commit` inside `_build_dhw_requirements` (`dhw_planner.py:951`), accepted only if the planner's own tank walk holds every floor and ceiling the uncommitted plan held and every run meets the planner's start rule (#3440's rebuild); the disinfection step is forced. Where the space plan is known (the `_co_optimize` re-plan and each round of the combi exchange), a charge that begins right after a space run pays only `p(space to hot water)` of a start, so hot water joins the end of a run. On a combi store that is the "one charge": the run is formed and priced on the store's total draw, and the split inside it only chooses the COP curve and the mode written.
 
 ## Alternatives
 
@@ -72,18 +72,18 @@ On a plan whose steps are all off or at the floor or above, this is the integer 
 
 ## Open pull requests
 
-Read from the pull-request heads by git on 2026-11-12. "Not on main" is all git shows of a head; the report lists these as open.
+Read on 2026-11-12 from the pull-request list (35 open), the threads of #3440, #3456 and #3461, and the heads by git.
 
-| PR | On main | Relation |
+| PR | State | Relation |
 |---|---|---|
-| #3456 supply minimum run and pause | no | builds on: commit keeps every planned run and pause at or above the gate's minimums, so the gate only meets off-grid writes |
-| #3457 stale step write | yes, as #3478 | builds on |
-| #3461 duty-switch learning, part A | no | builds on: P4 is its part C and reads only `usable`, `p` and `median_off_s`. Part B (order latch, minimum share) stays the arbiter's; a committed plan holds no both step into the costly direction, so B acts on unengaged installs and on leases. Part D (edges into the start counter) would feed `compressor_running` better than the per-cycle counter |
-| #3440 start hysteresis | no | complements; same hot file `dhw_planner.py`, so P4 goes after it. Bundled charges begin on a cooler tank and pass `drop_unstartable_dhw`. Its known limit (the plan's floor from the configured lift) is closed by P3 where a meter exists |
-| #3439 disinfection hold, #3497 disinfection set-point | no | `pump_arbiter.py` and `setpoint_check.py` only. P4 forces the disinfection step, so no commit moves or drops it |
-| #3434, #3435 learners | no; #3444 and #3468 on main cover the same learners | no planner file either way |
-| #3481 advisor steady start | no | conflict in text only: it also adds a `SolveInputs` field |
-| other heads of #3400 to #3502 not on main | | none touches `optimizer.py`, `dhw_planner.py`, `draw_range.py`, `wear.py` or `thermal_model.py` |
+| #3456 supply minimum run and pause | open; accepted as R10-OUTSIDE-SUPPLY-MIN-RUN-PAUSE, timing to move to the switch's own state | builds on. Its open owner decision (a planned run that ends inside the minimum is skipped, "a trade between delivered heat and compressor starts") meets a committed plan only off the grid: commit keeps every planned run and pause at or above the gate's minimums, so the plan no longer books heat the gate would skip |
+| #3457 stale step write | open; its change is on main as #3478 | builds on |
+| #3461 duty-switch learning, part A | open, draft | builds on. P4's switch price is the item that body names R10-DUTY-SWITCH-PLANNER-PRICE; it adds the reader and its first caller, as the body asks of the first part that reads the estimate. R10-DUTY-SWITCH-RESTART-LEARNING-PR-B (order latch, minimum share) stays the arbiter's: a committed plan holds no both step into the costly direction, so B acts on unengaged installs and on leases. Edges into the start counter (part D of the design review's split) would feed `compressor_running` better than the per-cycle counter |
+| #3440 start hysteresis | open; to be rebuilt as R10-OUTSIDE-DHW-START-HYSTERESIS after its own design note | complements, and P4 goes after it (`dhw_planner.py`). The maintainer's ruling there makes the start condition a rule the planner follows when it places a run, against the temperature written to the pump. `runs.commit` on the hot-water schedule takes that rule as its feasibility check, so the two do not place runs twice. The maintainer measured 64 of 114 planned hot-water runs starting within 4 K of the set-point, mostly short top-ups: the same shape as row 1. The raised heating lift becomes the one value for the write and the plan's pricing there; P3 is the metered check beside it, not a second source |
+| #3439 disinfection hold; #3497 R10-OUTSIDE-DISINFECTION-SETPOINT | open | `pump_arbiter.py` and `setpoint_check.py` only. P4 forces the disinfection step, so no commit moves or drops it |
+| #3434, #3435 learners | open; #3444 and #3468 on main touch the same learners | no planner file either way |
+| #3481 R10-ADVISOR-STEADY-START | open | conflict in text only: it also adds a `SolveInputs` field |
+| the other open pull requests | | checked by diff for every head from #3000 that is not on main: none touches `optimizer.py`, `dhw_planner.py`, `draw_range.py`, `wear.py` or `thermal_model.py` (#3356 does, and is on main as #3372) |
 
 Already on main and relied on: #3308 (replaced by P2), #3405 and #3433 (the feedback loop is no longer asked to hold a level under the pump's floor), #3358 and #3398, #3372.
 
@@ -120,7 +120,7 @@ Measured on the golden scenarios: a space solve makes 8 `_lbfgsb_run` calls toda
 
 1. A priced start engages bundling on a modulating install too, which moves the three goldens. Engaging on on_off alone would leave row 1 as it is.
 2. P3: the learned floor moves the plan (proposed), or stays a notice beside the configured figure.
-3. Whether P4 is R10-DUTY-SWITCH's part C or a group of its own, and whether P1 and P2 land as one group.
+3. Whether P4's hot-water half joins R10-DUTY-SWITCH-PLANNER-PRICE or R10-OUTSIDE-DHW-START-HYSTERESIS or is a group of its own, and whether P1 and P2 land as one group.
 
 ## Notes for the fixer
 
