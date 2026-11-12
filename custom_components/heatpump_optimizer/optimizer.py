@@ -1447,6 +1447,18 @@ def _combi_flux_exchange(
     return dhw_power
 
 
+def _recommitted(
+    opt: HeatPumpOptimizer, solve_space: Callable[..., Any], space: np.ndarray,
+    dhw: np.ndarray, status: str,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """``(space, dhw, status)``, space re-solved warm beside ``dhw`` -- which
+    commits it again -- where the exchange left an engaged total that no
+    longer runs: space was committed beside the plan before the exchange."""
+    if _engaged(opt) and not runs.realizable(space + dhw, opt.model.params.min_electrical_power):
+        space, status, _ = solve_space(dhw, space)
+    return space, dhw, status
+
+
 def _price_guess_weights(prices: np.ndarray) -> np.ndarray:
     """Per-step initial-guess weight in [0.2, 1.0], high where cheap.
 
@@ -3310,12 +3322,9 @@ class HeatPumpOptimizer:
                 credited = planner._dhw_planner_draws(raw, wood_temps)
                 coil_replan = not np.allclose(credited, raw, atol=1e-9)
             if draw_rates is not None and self.model.params.dhw_store.combi:
-                # A feasibility repair, not a scored candidate (its docstring);
-                # space committed beside the old plan is re-committed beside it.
-                exchanged = _combi_flux_exchange(self, h, planner, space_power, dhw_power, draw_rates, p_max)
-                if _engaged(self) and not runs.realizable(space_power + exchanged, self.model.params.min_electrical_power):
-                    space_power, status, _ = solve_space(exchanged, space_power)
-                return space_power, exchanged, status
+                # A feasibility repair, not a scored candidate (its docstring).
+                return _recommitted(self, solve_space, space_power, _combi_flux_exchange(
+                    self, h, planner, space_power, dhw_power, draw_rates, p_max), status)
             if not bool(np.any(pinned)) and not coil_replan:
                 return space_power, dhw_power, status
 
