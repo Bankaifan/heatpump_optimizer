@@ -227,8 +227,8 @@ def commit_store(
         steps = ((lambda t, k=k: idle[0](t) + store.heat(k, t), float(on_cost[k])), idle)
         whole = _advance(cost, temp, _moves(*lengths, want[k]), steps, float(start[k]), place, lengths[0])
         topped = _advance(cost, temp, [] if want[k] == 0.0 else _tops(lengths), (
-            steps[0], (lambda t, k=k: _charged(store, k, t)[0],
-                       lambda t, k=k: float(on_cost[k]) * _charged(store, k, t)[1]),
+            steps[0], (lambda t, k=k: _charge_end(store, k, t)[0],
+                       lambda t, k=k: float(on_cost[k]) * _charge_end(store, k, t)[1]),
         ), float(start[k]), place, lengths[0])
         top = topped[0] < whole[0]
         cost, temp = np.where(top, topped[0], whole[0]), np.where(top, topped[1], whole[1])
@@ -244,7 +244,7 @@ def charge_shares(store: Store, mask: np.ndarray) -> np.ndarray:
     whole step, less where the charge reaches the ceiling, 0 off."""
     share, t = np.zeros(len(mask)), np.array([store.initial])
     for k, on in enumerate(mask):
-        t, share[k] = (_charged(store, k, t)[0], float(_charged(store, k, t)[1][0])) if on else (
+        t, share[k] = (_charge_end(store, k, t)[0], float(_charge_end(store, k, t)[1][0])) if on else (
             store.decay * t + store.drift[k], 0.0)
     return share
 
@@ -256,7 +256,7 @@ def _tops(lengths: tuple[int, int]) -> list[tuple[int, int, bool]]:
     return [(i, min_on, i >= min_on) for i in range(states)]
 
 
-def _charged(store: Store, k: int, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _charge_end(store: Store, k: int, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """The store after a charging step ``k`` from ``t``, and the share of the
     step the charge ran before it reached the ceiling."""
     idle = store.decay * t + store.drift[k]
