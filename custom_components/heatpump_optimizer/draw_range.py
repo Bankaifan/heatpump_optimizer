@@ -145,10 +145,12 @@ class DrawRange:
     )
     #: Overdraws of the learned top since the store's newest sample.
     overdraws: int = 0
-    #: ``(drawn_kw, epoch_s)`` per running sample asked at or under the floor
-    #: in force (within ``AGREE_TOLERANCE``), oldest first: the pump asked for
-    #: its least. Keyed to ``config`` like the window; lapses like the
-    #: ceiling store.
+    #: ``(drawn_kw, epoch_s)`` per running sample asked at or under the
+    #: configured floor (within ``AGREE_TOLERANCE``), oldest first: the pump
+    #: asked for its least. Keyed to ``config`` like the window; lapses like
+    #: the ceiling store. Never against the learned floor, which would ratchet
+    #: on a meter that reads a little high: a plan asking the learned floor
+    #: files nothing, so the store lapses and the configured figure returns.
     floor: Deque[tuple[float, float]] = field(
         default_factory=lambda: deque(maxlen=WINDOW)
     )
@@ -186,15 +188,13 @@ class DrawRange:
     def learned_min_kw(self, now_s: float) -> float | None:
         """The ``LOW_PERCENTILE`` of the floor store's draws, kW, raw.
 
-        ``None`` below ``MIN_SAMPLES``, or past ``CEILING_LAPSE_DAYS`` after
-        the newest sample (or with it ahead of ``now_s``). Asks above the
+        ``None`` below ``MIN_SAMPLES`` samples taken within
+        ``CEILING_LAPSE_DAYS`` before ``now_s``: an old sample lapses on its own
+        age, so a lapsed store cannot come back on one fresh one. Asks above the
         floor never enter, so a cold week's high draws cannot raise it.
         """
-        if len(self.floor) < MIN_SAMPLES:
-            return None
-        if not 0.0 <= now_s - self.floor[-1][1] <= CEILING_LAPSE_DAYS * 86400.0:
-            return None
-        return float(np.percentile([d for d, _ in self.floor], LOW_PERCENTILE))
+        fresh = [d for d, t in self.floor if 0.0 <= now_s - t <= CEILING_LAPSE_DAYS * 86400.0]
+        return float(np.percentile(fresh, LOW_PERCENTILE)) if len(fresh) >= MIN_SAMPLES else None
 
     def _ceiling_median(self) -> float:
         return float(np.median([d for d, _ in self.ceiling]))
@@ -298,8 +298,8 @@ class DrawRange:
         ``command`` is the sample's ``(written_c, ceiling_c)``. A commanded
         sample meeting evidence stored without commands drops it, as a
         changed configuration does: what capped those draws is unknown.
-        ``when_s``, epoch seconds, files a sample asked at or under the floor
-        in force -- the learned one where it stands -- into the floor store.
+        ``when_s``, epoch seconds, files a sample asked at or under the
+        configured floor into the floor store.
         """
         configured = (float(cfg_min), float(cfg_max))
         legacy = command is not None and not self.commands_known
@@ -309,8 +309,7 @@ class DrawRange:
             self.engaged = False
             self.config = configured
             self.floor.clear()
-        in_force = max(float(cfg_min), self.learned_min_kw(when_s) or 0.0) if when_s is not None else 0.0
-        if when_s is not None and 0.0 < asked_kw <= (1.0 + AGREE_TOLERANCE) * in_force and drawn_kw > self.above_idle_kw():
+        if when_s is not None and 0.0 < asked_kw <= (1.0 + AGREE_TOLERANCE) * cfg_min and drawn_kw > self.above_idle_kw():
             self.floor.append((float(drawn_kw), float(when_s)))
         self.commands_known = True
         self.samples.append((float(drawn_kw), float(asked_kw)))

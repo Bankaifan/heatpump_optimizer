@@ -85409,19 +85409,24 @@ R.check(
 )
 
 
-def _hs_solve(cost, prices, clamp=False):
-    """Space-only solve on a 1.1-3.3 kW pump, mild weather."""
+def _hs_solve(cost, prices, clamp=False, room=21.0, out=None, dhw=False, **limits):
+    """A solve on a 1.1-3.3 kW pump, mild weather unless ``out`` says otherwise."""
     params = _HsTP()
     params.min_electrical_power, params.max_electrical_power = _HS_F, 3.3
-    params.dhw_enabled = False
-    out = 6.0 + 3 * np.sin(2 * np.pi * (np.arange(96) - 50) / 96)
+    params.dhw_enabled = dhw
+    out = 6.0 + 3 * np.sin(2 * np.pi * (np.arange(96) - 50) / 96) if out is None else out
     opt = _hs_om.HeatPumpOptimizer(_HsTM(params), _hs_om.OptimizationConfig(
         cycling_cost=cost, clamp_planned_levels=clamp))
     return opt.optimize(inputs=solve_inputs(
-        initial_state=_HsTS(room_temperature=21.0, slab_temperature=22.0,
+        initial_state=_HsTS(room_temperature=room, slab_temperature=room + 1.0,
                             outdoor_temperature=float(out[0])),
-        prices=prices, outdoor_temps=out, start_time=datetime(2026, 1, 10, tzinfo=UTC),
+        prices=prices, outdoor_temps=out, start_time=datetime(2026, 1, 10, tzinfo=UTC), **limits,
     ))
+
+
+def _hs_edges(total):
+    on = np.asarray(total) > 0.1
+    return int(np.sum(on & ~np.r_[False, on[:-1]]))
 
 
 _hs_flat = np.full(96, 1.0)
@@ -85432,10 +85437,48 @@ R.check(
     "P2 dispatch: a priced start ships every step off or in [floor, cap], publishes the "
     "plan's integer count, and starts no more often than the relaxed plan reads",
     bool(np.all((_hs_plan == 0.0) | ((_hs_plan >= _HS_F - 1e-9) & (_hs_plan <= 3.3 + 1e-9))))
-    and _hs_priced.compressor_starts == _hs.start_count(_hs_plan, _HS_F)
+    and _hs_priced.compressor_starts == _hs_edges(_hs_plan)
     and _hs_priced.compressor_starts <= _hs.start_count(_hs_relaxed, _HS_F),
     f"starts {_hs_priced.compressor_starts} relaxed {_hs.start_count(_hs_relaxed, _HS_F):.2f}, "
     f"sub-floor {int(np.sum((_hs_plan > 0) & (_hs_plan < _HS_F - 1e-9)))}",
+)
+# The reviewer's cells: a cap under the floor for twelve hours on a cold
+# house, and a cold day where one run through used to ship. Never worse than
+# the projection: the house no colder than the unpriced plan leaves it, and no
+# objective above the unpriced plan's sub-floor steps snapped.
+_hs_sine = 1.0 + 0.5 * np.sin(np.arange(96) / 8.0)
+_hs_cap = dict(power_caps_extra=np.r_[np.full(48, 0.8), np.full(48, 3.3)], room=19.0)
+_hs_capped = [_hs_solve(c, _hs_sine, **_hs_cap) for c in (2.5, 0.0)]
+_hs_cold = dict(room=19.5, out=np.full(96, -2.0))
+_hs_seen = []
+_hs_kept_commit = _hs_om._commit_runs
+_hs_om._commit_runs = lambda *a: _hs_seen.append(a[2]) or _hs_kept_commit(*a)
+try:
+    _hs_through = _hs_solve(2.5, _hs_sine, **_hs_cold)
+finally:
+    _hs_om._commit_runs = _hs_kept_commit
+_hs_unpriced = np.asarray(_hs_solve(0.0, _hs_sine, **_hs_cold).power_schedule)
+_hs_snapped = np.where(_hs_unpriced < _HS_F, np.where(_hs_unpriced > 0.5, _HS_F, 0.0), _hs_unpriced)
+_hs_onoff = np.asarray(_hs_solve(0.0, _hs_sine, clamp=True).power_schedule)
+R.check(
+    "never worse than the projection: a cap under the floor leaves the house no colder "
+    "than the unpriced plan does; a cold day ships no objective above the unpriced plan "
+    "snapped; an on/off install at no start cost ships every step off or at the floor",
+    min(_hs_capped[0].room_temp_trajectory) >= min(_hs_capped[1].room_temp_trajectory) - 0.05
+    and _hs_through.objective_value <= _hs_seen[-1](_hs_snapped) + 1e-9
+    and bool(np.all((_hs_onoff == 0.0) | (_hs_onoff >= _HS_F - 1e-9))),
+    f"capped rooms {min(_hs_capped[0].room_temp_trajectory):.2f} / "
+    f"{min(_hs_capped[1].room_temp_trajectory):.2f}, cold day {_hs_through.objective_value:.2f} "
+    f"against {_hs_seen[-1](_hs_snapped):.2f}",
+)
+_hs_hot = _hs_solve(0.0, _hs_sine, clamp=True, dhw=True, space_blocked=True)
+_hs_hot_plan = np.asarray(_hs_hot.dhw_power_schedule)
+R.check(
+    "P4: on an install that cannot duty-cycle, at no start cost, every hot-water step is off "
+    "or at the floor, and the published starts are the plan's edges",
+    bool(np.all((_hs_hot_plan == 0.0) | (_hs_hot_plan >= _HS_F - 1e-9)))
+    and _hs_hot.compressor_starts == _hs_edges(_hs_hot_plan + np.asarray(_hs_hot.power_schedule)),
+    f"{np.round(_hs_hot_plan[_hs_hot_plan > 0], 3).tolist()}",
 )
 _hs_cfg = _hs_om.OptimizationConfig(cycling_cost=2.5)
 _hs_opt = _hs_om.HeatPumpOptimizer(_HsTM(_HsTP(min_electrical_power=_HS_F)), _hs_cfg)
@@ -85484,6 +85527,18 @@ R.check(
     and _hs_band(_hs_low, lo=0.6).min_kw == 0.6
     and _hs_dr.DrawRange.from_dict(_hs_low.as_dict()).learned_min_kw(_HS_NOW) == 1.1,
 )
+_hs_ratchet, _hs_t, _hs_floors = _hs_draw([(1.1, 0.5)] * _hs_n), _HS_NOW, []
+for _ in range(6000):  # a plan asking the floor in force, a meter 4 % high
+    _hs_f = _hs_band(_hs_ratchet, now=_hs_t).min_kw
+    _hs_ratchet.observe(1.04 * _hs_f, _hs_f, 0.53, 3.3, when_s=_hs_t)
+    _hs_floors.append(_hs_f)
+    _hs_t += 900.0
+R.check(
+    "P3: the floor does not ratchet: asking the learned floor files nothing, so the "
+    "store lapses and the configured figure returns",
+    max(_hs_floors) == 1.1 and _hs_floors[-1] == 0.53,
+    f"max {max(_hs_floors)}, last {_hs_floors[-1]}",
+)
 
 # P4: twelve short charges on a 1.1 kW floor, committed against the tank walk.
 _hs_tp = _HsTP(min_electrical_power=_HS_F, max_electrical_power=3.3, dhw_enabled=True)
@@ -85501,7 +85556,7 @@ _hs_req = np.full(96, 30.0)
 
 def _hs_charge(cost):
     planner = _HsPlanner(_hs_tm, _hs_om.OptimizationConfig(), charge_runs=(
-        (cost, 0.0, False) if cost > 0 else None))
+        (cost, 0.0, False, False, False) if cost > 0 else None))
     return planner, _hs_charges(planner, _hs_ctx, _hs_pulses, 50.0, _hs_draws, _hs_req,
                                 np.full(96, _hs_tp.dhw_max_temp), None, 40, None)
 

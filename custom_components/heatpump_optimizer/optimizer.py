@@ -151,12 +151,99 @@ def _engaged(opt: HeatPumpOptimizer) -> bool:
     return opt.config.cycling_cost > 0 or opt.config.clamp_planned_levels
 
 
-def _charge_runs(opt: HeatPumpOptimizer, inputs: SolveInputs) -> tuple[float, float, bool] | None:
-    """``DhwPlanner.charge_runs``: a start's price, a joining charge's share of
-    it and the running state, where the solve plans runs; else None."""
+def _charge_runs(opt: HeatPumpOptimizer, inputs: SolveInputs) -> tuple[float, float, bool, bool, bool] | None:
+    """``DhwPlanner.charge_runs``, where the solve plans runs, else None: a
+    start's price, a joining charge's share of it, whether the compressor and
+    whether a hot-water charge run now, and whether the install cannot
+    duty-cycle."""
     if not _engaged(opt):
         return None
-    return opt.config.cycling_cost, opt.config.duty_stop_to_dhw, inputs.compressor_running
+    cfg = opt.config
+    return (cfg.cycling_cost, cfg.duty_stop_to_dhw, inputs.compressor_running, inputs.charge_running,
+            cfg.clamp_planned_levels)
+
+
+def _projected(
+    space: np.ndarray, other: np.ndarray, floor: float, hi: np.ndarray, duty: bool,
+    rounded: bool = False,
+) -> np.ndarray:
+    """The per-step projection the plan shipped before runs were committed: a
+    running step under the floor raised to it (beside hot water, to the floor
+    less its draw), or with ``rounded`` switched off below half of it where no
+    hot water runs. One its
+    cap cannot raise there is switched off, or, on an install that can
+    duty-cycle (``duty``), kept: cycling is then the only way the pump can
+    deliver it."""
+    low = np.maximum(floor - other, 0.0)
+    raised = np.where(low <= hi, low, space if duty else 0.0)
+    raised = np.where(rounded & (other <= 0.0) & (space < low / 2.0) & (low <= hi), 0.0, raised)
+    return np.where((space + other > 0.0) & (space < low), raised, np.minimum(space, hi))
+
+
+def _failed_guess(
+    opt: HeatPumpOptimizer, guess: np.ndarray, dhw: np.ndarray | None, hi: np.ndarray,
+) -> np.ndarray:
+    """What a failed solve ships: its guess, projected where the solve plans runs."""
+    if not _engaged(opt):
+        return guess
+    other, floor = _beside(opt, guess, dhw)
+    return _projected(np.clip(guess, 0.0, hi), other, floor, hi, not opt.config.clamp_planned_levels)
+
+
+def _beside(opt: HeatPumpOptimizer, space: np.ndarray, dhw: np.ndarray | None) -> tuple[np.ndarray, float]:
+    """The hot water beside a space plan, zeros without, and the running floor."""
+    other = np.zeros_like(space) if dhw is None else np.asarray(dhw, dtype=float)
+    return other, runs.floor_kw(opt.model.params.min_electrical_power)
+
+
+def _unpriced(
+    opt: HeatPumpOptimizer, objective: Callable[..., float], objective_batch: Callable[..., np.ndarray],
+    bounds: list[tuple[float, float]], space: np.ndarray, args: tuple[Any, ...], maxiter: int,
+) -> np.ndarray:
+    """``space`` relaxed once more with the start term off."""
+    opt._start_scale = 0.0
+    try:
+        return np.asarray(_lbfgsb_run(objective, objective_batch, space, bounds, args, maxiter).x, dtype=float)
+    finally:
+        opt._start_scale = 1.0
+
+
+def _pinned_run(
+    objective: Callable[..., float], objective_batch: Callable[..., np.ndarray], args: tuple[Any, ...],
+    maxiter: int, start: np.ndarray, low: np.ndarray, high: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    """One warm L-BFGS-B run and its polish inside ``[low, high]``, and its score."""
+    pinned = list(zip(low.tolist(), high.tolist()))
+    run = _lbfgsb_run(objective, objective_batch, np.clip(start, low, high), pinned, args, maxiter)
+    run = _lbfgsb_restart(run, objective, pinned, args, maxiter, objective_batch)
+    x = np.clip(np.asarray(run.x, dtype=float), low, high)
+    return float(objective(x, *args)), x
+
+
+def _run_candidates(
+    opt: HeatPumpOptimizer, h: _Horizon, objectives: tuple[Callable[..., Any], Callable[..., Any]],
+    bounds: list[tuple[float, float]], space: np.ndarray, other: np.ndarray, floor: float,
+    args: tuple[Any, ...], maxiter: int,
+) -> tuple[list[np.ndarray], list[tuple[np.ndarray, np.ndarray]], bool]:
+    """``_commit_runs``' candidates: the projections of the relaxed plan and of
+    it relaxed without the start term, raised and rounded; the distinct masks
+    to dispatch, each with its start; and whether a commit mask tracked."""
+    lo, hi = (np.array([b[i] for b in bounds], dtype=float) for i in (0, 1))
+    relaxed = [space]
+    if opt.config.cycling_cost > 0:
+        relaxed.append(np.clip(_unpriced(opt, *objectives, bounds, space, args, maxiter), lo, hi))
+    duty = not opt.config.clamp_planned_levels
+    starts = [_projected(x, other, floor, hi, duty, r) for x in relaxed for r in (False, True)]
+    forced = np.where((other > 0.0) | (lo > 0.0), 1.0, np.where(hi + other <= 0.0, 0.0, np.nan))
+    masks, exact = runs.candidates(
+        space + other, h.prices, floor, hi + other, opt.config.cycling_cost,
+        dt=h.dt, running=h.compressor_running, forced=forced,
+    )
+    dispatch: list[tuple[np.ndarray, np.ndarray]] = []
+    for mask, start in [*((x + other > 0.0, x) for x in starts), *((m, space) for m in masks)]:
+        if not any(np.array_equal(mask, m) for m, _ in dispatch):
+            dispatch.append((mask, start))
+    return starts, dispatch, exact
 
 
 def _commit_runs(
@@ -172,40 +259,42 @@ def _commit_runs(
     """The relaxed space plan as runs the pump can run, and a status note.
 
     Identity unengaged, or where no running step is under the floor. Else
-    each band's ``runs.commit`` mask of the combined draw is dispatched: on
+    the candidates are the relaxed plan projected (``_projected``), the plan
+    relaxed once more without the start term and projected, and each band's
+    ``runs.commit`` mask of the combined draw; every mask is dispatched on
     steps bounded to ``[floor, cap]`` (beside the fixed hot water, the floor
     less its draw there), off steps to ``(0, 0)``, one warm L-BFGS-B run and
-    its polish setting the levels; the lowest objective ships. Built from the
-    bounds, never from ``h.space_pins``, whose safety release would report a
-    committed step as a released pin. Where no band holds a mask, the
-    tightest band's best effort ships and the note says so; nothing is raised.
+    its polish setting the levels. The lowest true objective, start term
+    included, ships, so a committed plan never ships worse than the
+    projection; a failure anywhere in this stage ships the projection. Built
+    from the bounds, never from ``h.space_pins``, whose safety release would
+    report a committed step as a released pin.
     """
-    other = np.zeros_like(space) if dhw is None else np.asarray(dhw, dtype=float)
-    floor = runs.floor_kw(opt.model.params.min_electrical_power)
+    other, floor = _beside(opt, space, dhw)
     if not _engaged(opt) or runs.realizable(space + other, floor):
         return space, None
     lo, hi = (np.array([b[i] for b in bounds], dtype=float) for i in (0, 1))
-    forced = np.where(
-        (other > 0.0) | (lo > 0.0), 1.0, np.where(hi + other <= 0.0, 0.0, np.nan)
-    )
     args = () if dhw is None else (dhw,)
-    masks, exact = runs.candidates(
-        space + other, h.prices, floor, hi + other, opt.config.cycling_cost,
-        dt=h.dt, running=h.compressor_running, forced=forced,
-    )
-    best: tuple[float, np.ndarray] | None = None
-    for mask in masks:
-        low = np.where(mask, np.minimum(np.maximum(lo, floor - other), hi), 0.0)
-        high = np.where(mask, hi, 0.0)
-        pinned = list(zip(low.tolist(), high.tolist()))
-        run = _lbfgsb_run(objective, objective_batch, np.clip(space, low, high), pinned, args, maxiter)
-        run = _lbfgsb_restart(run, objective, pinned, args, maxiter, objective_batch)
-        x = np.clip(np.asarray(run.x, dtype=float), low, high)
-        score = float(objective(x, *args))
-        if best is None or score < best[0]:
-            best = (score, x)
-    assert best is not None
+    duty = not opt.config.clamp_planned_levels
+    projection = _projected(space, other, floor, hi, duty)
+    # Steps whose cap is under the floor: cycling under it is the only way a
+    # duty-cycling install delivers there, so the dispatch leaves them free.
+    cycled = duty & (hi + other < floor)
+    try:
+        starts, dispatch, exact = _run_candidates(
+            opt, h, (objective, objective_batch), bounds, space, other, floor, args, maxiter,
+        )
+        best = min(((float(objective(x, *args)), x) for x in starts), key=lambda c: c[0])
+        for mask, start in dispatch:
+            low = np.where(mask, np.minimum(np.maximum(lo, floor - other), hi), 0.0)
+            best = min(best, _pinned_run(
+                objective, objective_batch, args, maxiter, start, low, np.where(mask | cycled, hi, 0.0),
+            ), key=lambda c: c[0])
+    except Exception as err:  # the stage ships the projection, never a failure
+        _LOGGER.debug("Committing runs failed, the projection ships: %s", err)
+        return projection, "runs projected"
     return best[1], None if exact else "runs best effort"
+
 
 def _padded_nonneg(values: Any, n_steps: int) -> np.ndarray:
     """A per-step series clipped at zero and fitted to the horizon: cut to
@@ -2425,9 +2514,11 @@ class SolveInputs:
     forecast: ForecastSeries
     start_time: datetime | None = None
     limits: SolveLimits = field(default_factory=SolveLimits)
-    #: The compressor runs at solve time (``StartCounter.running``): a run
-    #: continuing from it is no start.
+    #: The compressor runs at solve time (``StartCounter.running`` where a
+    #: meter reads, else the executing plan's step): a run continuing from it
+    #: is no start. ``charge_running``: that step is charging hot water.
     compressor_running: bool = False
+    charge_running: bool = False
 
 
 def _house_ua_kw_per_c(params: ThermalParameters, scale: float = 1.0) -> float:
@@ -2699,6 +2790,8 @@ class HeatPumpOptimizer:
     #: 0.5 for the continuation ``_optimize_space_only`` runs on its first
     #: start -- see there.
     _floor_l1_scale = 1.0
+    #: The start term's share: 1.0, 0.0 for ``_commit_runs``' unpriced relax.
+    _start_scale = 1.0
 
     def __init__(
         self,
@@ -3455,12 +3548,14 @@ class HeatPumpOptimizer:
         # The start term: the configured cost per start times the plan's
         # start count on the combined draw (``runs``), zero at zero cost.
         def cycling(power: np.ndarray, dhw: np.ndarray | None = None) -> float:
-            return float(cycling_batch(np.asarray(power, dtype=float)[None, :], dhw)[0])
+            if cfg.cycling_cost <= 0:
+                return 0.0
+            return cfg.cycling_cost * self._start_scale * runs.start_count(power, floor, running, dhw, *duty)
 
         def cycling_batch(power_matrix: np.ndarray, dhw: np.ndarray | None = None) -> np.ndarray:
             if cfg.cycling_cost <= 0:
                 return np.zeros(np.shape(power_matrix)[0])
-            return cfg.cycling_cost * runs.start_count_batch(power_matrix, floor, running, dhw, *duty)
+            return cfg.cycling_cost * self._start_scale * runs.start_count_batch(power_matrix, floor, running, dhw, *duty)
 
         # One billing record for the scalar closure and its batch twin, so
         # the two can never disagree about the tariff they are pricing. The
@@ -4412,11 +4507,8 @@ class HeatPumpOptimizer:
             # keeps the first pass's status and stays at DEBUG, as its sibling
             # except does (R10-N-log-flood, #2337).
             _LOGGER.debug("Space heating optimization (with DHW) failed: %s", e)
-            return (
-                guess,
-                f"failed ({e})",
-                float(objective(guess, dhw_plan)),
-            )
+            guess = _failed_guess(self, guess, dhw_plan, headroom)
+            return guess, f"failed ({e})", float(objective(guess, dhw_plan))
 
     @staticmethod
     def _normalise_pins(
@@ -4986,7 +5078,7 @@ class HeatPumpOptimizer:
             # ``_note_solve_failure``; the per-solve ERROR here was the
             # duplicate (R10-N-log-flood, #2337).
             _LOGGER.debug("Optimization failed: %s", e)
-            optimal_power = initial_power
+            optimal_power = _failed_guess(self, initial_power, None, np.array([b[1] for b in bounds]))
             status = f"failed ({e})"
 
         # Simulate with optimal schedule
@@ -5088,8 +5180,7 @@ class HeatPumpOptimizer:
             "peak_kw": round(peak_kw, 3),
             "peak_cost": round(peak_cost(total_power, baseline_load, bill), 3),
             "starts": (
-                int(round(runs.start_count(total_power, self.model.params.min_electrical_power, running)))
-                if _engaged(self) else count_compressor_starts(total_power)
+                runs.edge_count(total_power, running) if _engaged(self) else count_compressor_starts(total_power)
             ),
         }
 

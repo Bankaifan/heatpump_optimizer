@@ -2447,6 +2447,16 @@ def _solve_band(draw: draw_range.DrawRange, hub: ThermalParameters, config: Any,
     return draw_range.solve_band(draw, hub, probe_install(config), dt_util.now().timestamp(), engaged=cycling_cost > 0 or levels_clamped(config))
 
 
+def _running_fields(counted: bool, measured: float | None, action: Mapping[str, Any]) -> dict[str, bool]:
+    """``SolveInputs``' running state: the start counter's where a meter
+    reads, else the executing plan's current step; and whether that step
+    charges hot water. With neither, nothing runs."""
+    return {
+        "compressor_running": counted if measured is not None else bool(action.get("heat_pump_on", False)),
+        "charge_running": bool(action.get("dhw_heating_active", False)),
+    }
+
+
 def _band_fields(band: draw_range.SolveBand) -> dict[str, float]:
     """The solve copy's power range under ``band``; none where configured,
     so a configured band leaves the copy the hub's figures byte for byte."""
@@ -6346,7 +6356,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator[Payload]):
                 dhw_blocked=self._pump_signals.dhw_blocked,
                 off_steps=quiet.off_steps,
                 quiet_actions=quiet.actions,
-            ), compressor_running=self._start_counter.running,
+            ), **_running_fields(self._start_counter.running, self._measured_power, self._current_action),
         ), band)
 
     async def async_run_optimization(self) -> str | None:

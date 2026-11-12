@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import timedelta
-from functools import partial
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -39,6 +38,10 @@ MIN_OFF = timedelta(minutes=10)
 BANDS = (2, 6, 24)
 #: The balance grid: cells per floor step of energy.
 QUANTA_PER_STEP = 4
+#: A balance outside the band pays this many times the horizon's dearest
+#: price per kWh outside it: penalised, so the cheapest way back wins, never
+#: forgotten.
+OUT_OF_BAND = 10.0
 #: ``commit_store``'s temperature grid, kelvin per cell.
 STORE_GRID_K = 0.25
 #: What a step pays for leaving the relaxed plan's own on/off reading: a tie
@@ -107,6 +110,13 @@ def start_count_batch(
     return count + to_space * row_sums(into_space) + to_dhw * row_sums(s0 * d)
 
 
+def edge_count(total: Any, running: bool = False) -> int:
+    """The off-to-on edges of a shipped plan, the plan's running rule
+    (``MIN_RUNNING_DRAW_KW``), none at step 0 while the compressor runs."""
+    on = np.asarray(total, dtype=float) > MIN_RUNNING_DRAW_KW
+    return int(np.sum(on & ~np.r_[running, on[:-1]]))
+
+
 def realizable(total: Any, floor: float) -> bool:
     """Every step off or at the floor or above: the plan runs as it stands."""
     q = np.asarray(total, dtype=float)
@@ -130,8 +140,9 @@ def commit(
     floor)`` under ``caps`` and costs its price; an off-to-on edge costs
     ``start_cost`` (a scalar, or one per step). ``forced`` is the pin
     encoding (NaN free, 0 off, 1 on); a cap under the floor forces a step off.
-    A forced step may cut a run or a pause short. Where no mask stays inside
-    the band, the one nearest it is returned with ``False``: a best effort,
+    A forced step may cut a run or a pause short. A balance outside the band
+    is held at its edge cell, keeping its value, and pays ``OUT_OF_BAND`` for
+    the energy outside; ``False`` says the mask left the band, a best effort,
     never a raise.
     """
     q = np.asarray(q, dtype=float)
@@ -149,13 +160,12 @@ def commit(
     half = QUANTA_PER_STEP * int(band)
     cost, bal = _origin(lengths, 2 * half + 1, running, half, 0.0)
     trail = []
-    exact = True
+    fine = OUT_OF_BAND * max(float(np.max(np.abs(np.asarray(prices, dtype=float)[:n]))), 1e-6)
 
-    def place(b: np.ndarray, clip: bool) -> tuple[np.ndarray, np.ndarray]:
+    def place(b: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         j = np.rint(b / quantum).astype(np.int64) + half
-        if clip:
-            j = np.clip(j, 0, 2 * half)
-        return j, (j >= 0) & (j <= 2 * half)
+        outside = np.maximum(np.abs(b) - half * quantum, 0.0)
+        return np.clip(j, 0, 2 * half), np.ones(j.shape, dtype=bool), fine * outside
 
     for k in range(n):
         moves = _moves(min_on, min_off, want[k])
@@ -164,21 +174,14 @@ def commit(
             (lambda b, i=on_inc: b + i, on_cost[k] + TIE_BREAK * (not reading[k])),
             (lambda b, i=off_inc: b + i, TIE_BREAK * reading[k]),
         )
-        nxt = _advance(cost, bal, moves, steps, float(start[k]), partial(place, clip=False), min_on)
-        if not np.isfinite(nxt[0]).any():
-            exact = False
-            nxt = _advance(cost, bal, moves, steps, float(start[k]), partial(place, clip=True), min_on)
-        cost, bal = nxt[0], nxt[1]
-        trail.append(nxt[2])
-    live = np.isfinite(cost)
-    inside = live & (np.abs(bal) <= f * dt / 2.0 + 1e-12)
-    keys: tuple[np.ndarray, ...] = (cost[inside],)
-    if not inside.any():
-        exact, inside = False, live
-        keys = (cost[inside], np.abs(bal[inside]))
-    order = np.lexsort(keys)
-    u, j = (int(a[order[0]]) for a in np.nonzero(inside))
-    return _unwind(trail, u, j, min_on), exact
+        cost, bal, back = _advance(cost, bal, moves, steps, float(start[k]), place, min_on)
+        trail.append(back)
+    ending = cost + fine * np.maximum(np.abs(bal) - f * dt / 2.0, 0.0)
+    u, j = (int(a) for a in np.unravel_index(np.argmin(ending), ending.shape))
+    mask = _unwind(trail, u, j, min_on)
+    walk = np.cumsum(np.where(mask, level, 0.0) - q) * dt
+    exact = bool(np.all(np.abs(walk) <= half * quantum + 1e-9) and abs(walk[-1]) <= f * dt / 2.0 + 1e-9)
+    return mask, exact
 
 
 class Store(NamedTuple):
@@ -292,20 +295,23 @@ def candidates(
     *, dt: float, running: bool = False, forced: Any = None,
 ) -> tuple[list[np.ndarray], bool]:
     """``commit``'s distinct masks over ``BANDS``, tightest first, at the
-    ``MIN_ON`` and ``MIN_OFF`` step counts of ``dt``, and whether they track.
-    Where a band holds no mask, the tightest best effort alone, with False."""
+    ``MIN_ON`` and ``MIN_OFF`` step counts of ``dt``, and whether one tracks.
+    Where none does, the band widens to the whole horizon too; every mask is
+    returned, best efforts included, for the true objective to judge."""
     masks: list[np.ndarray] = []
     lengths = (steps_at_least(MIN_ON, dt), steps_at_least(MIN_OFF, dt))
-    for band in BANDS:
+    tracked = False
+    for band in (*BANDS, np.size(q)):
+        if tracked and band > BANDS[-1]:
+            break
         mask, exact = commit(
             q, prices, floor, caps, start_cost, band, dt=dt, running=running,
             forced=forced, lengths=lengths,
         )
-        if not exact:
-            return masks or [mask], bool(masks)
+        tracked |= exact
         if not any(np.array_equal(mask, m) for m in masks):
             masks.append(mask)
-    return masks, True
+    return masks, tracked
 
 
 def _moves(min_on: int, min_off: int, want: float) -> list[tuple[int, int, bool]]:
@@ -329,12 +335,13 @@ def _moves(min_on: int, min_off: int, want: float) -> list[tuple[int, int, bool]
 def _advance(
     cost: np.ndarray, val: np.ndarray, moves: list[tuple[int, int, bool]],
     steps: tuple[tuple[Callable[[np.ndarray], np.ndarray], Any], ...], start: float,
-    place: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]], min_on: int,
+    place: Callable[[np.ndarray], tuple[np.ndarray, ...]], min_on: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """One step of the program: the cheapest arrival per cell, and where it
     came from. ``steps`` is ``(move, cost)`` on and off, ``move`` taking a
-    cell's value to the next and ``cost`` a float or a function of the value; ``place`` gives each new value its cell and
-    whether it is inside the bounds."""
+    cell's value to the next and ``cost`` a float or a function of the value;
+    ``place`` gives each new value its cell, whether it is inside the bounds
+    and, optionally, what it pays for where it landed."""
     width = cost.shape[1]
     new_cost = np.full_like(cost, np.inf)
     new_bal = np.zeros_like(val)
@@ -350,7 +357,8 @@ def _advance(
         b = np.concatenate([move(val[s]) for s, _ in srcs])
         origin = np.concatenate([np.full(width, s) for s, _ in srcs])
         came = np.tile(cells, len(srcs))
-        j, inside = place(b)
+        j, inside, *fine = place(b)
+        c = c + fine[0] if fine else c
         ok = np.isfinite(c) & inside
         if not ok.any():
             continue

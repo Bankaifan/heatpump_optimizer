@@ -207,18 +207,50 @@ def _commit_charges(
     lower or higher than the plan went where it did not). The disinfection
     step is forced on, the forced-off steps off. Where the space plan is
     known, a charge that begins in or right after a space run joins it and
-    pays only the join share of a start. The mask ships only if the
-    planner's real walk keeps those floors and ceilings; otherwise the plan
-    stands.
+    pays only the join share of a start, as does one at step 0 while the
+    compressor runs. The mask ships only if the planner's real walk keeps
+    those floors and ceilings; otherwise the plan stands. Where the install
+    cannot duty-cycle, a step under the floor then runs at it.
     """
+    if planner.charge_runs is None or not np.any(plan > 0.0):
+        return plan
+    shipped = _stored_charges(
+        planner, ctx, plan, initial_temp, draw_rates, requirement, max_temp, forced_off, disinfection, space,
+    )
+    floor, level = runs.floor_kw(planner.model.params.min_electrical_power), ctx.p_dhw_max
+    cost, _join, _compressor, charging, clamped = planner.charge_runs
+    if not clamped:
+        return shipped
+    # The floor is physics on an install that cannot duty-cycle, whatever a
+    # start costs: a step under it runs at it, or not at all over the cap.
+    # The committed plan so lifted, or the plan's own projection (the plan
+    # before runs were committed), whichever its prices and starts make cheaper.
+    lifted = [np.where((x > 0.0) & (x < floor), floor if floor <= level else 0.0, x) for x in (shipped, plan)]
+    return min(lifted, key=lambda x: float(np.sum(ctx.prices * x) * ctx.dt) + cost * runs.edge_count(x, charging))
+
+
+def _stored_charges(
+    planner: DhwPlanner,
+    ctx: _DhwPlanContext,
+    plan: np.ndarray,
+    initial_temp: float,
+    draw_rates: np.ndarray,
+    requirement: np.ndarray,
+    max_temp: Any,
+    forced_off: np.ndarray | None,
+    disinfection: int | None,
+    space: np.ndarray | None,
+) -> np.ndarray:
+    """``_commit_charges`` before the floor: ``runs.commit_store``'s plan
+    where the real walk keeps it, else ``plan``."""
     level = ctx.p_dhw_max
     floor = runs.floor_kw(planner.model.params.min_electrical_power)
-    if planner.charge_runs is None or not np.any(plan > 0.0) or level < floor or ctx.c_dhw <= 0.0:
+    if level < floor or ctx.c_dhw <= 0.0:
         return plan
-    cost, join, running = planner.charge_runs
+    cost, join, compressor, charging, _clamped = planner.charge_runs or (0.0, 0.0, False, False, False)
     n, dt = ctx.n_steps, ctx.dt
     space_on = np.zeros(n, dtype=bool) if space is None else np.asarray(space, dtype=float)[:n] > 0.0
-    joins = space_on | np.r_[running if space is not None else False, space_on[:-1]]
+    joins = space_on | np.r_[compressor, space_on[:-1]]
     forced = np.full(n, np.nan)
     if forced_off is not None:
         forced[forced_off] = 0.0
@@ -244,7 +276,7 @@ def _commit_charges(
         lambda k, t: np.interp(t, grid, cop[:, k]) * per_cop, floors, ceilings,
     )
     mask = runs.commit_store(
-        store, ctx.prices * level * dt, cost * np.where(joins, join, 1.0), running=running, forced=forced,
+        store, ctx.prices * level * dt, cost * np.where(joins, join, 1.0), running=charging, forced=forced,
         lengths=(runs.steps_at_least(runs.MIN_ON, dt), runs.steps_at_least(runs.MIN_OFF, dt)),
     )
     if mask is None:
@@ -411,7 +443,7 @@ class DhwPlanner:
         config: _PlannerConfig,
         pv_surplus: np.ndarray | None = None,
         price_known: np.ndarray | None = None,
-        charge_runs: tuple[float, float, bool] | None = None,
+        charge_runs: tuple[float, float, bool, bool, bool] | None = None,
     ) -> None:
         self.model = model
         self.config = config
