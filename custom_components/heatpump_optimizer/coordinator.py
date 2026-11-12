@@ -350,6 +350,7 @@ from .thermal_model import (
     learner_room_unread,
     mold_safe_room_floor,
     learner_unmetered,
+    levels_clamped,
     on_threshold_kw,
     plan_step_runs,
     planned_draw_runs,
@@ -2439,15 +2440,17 @@ def _sweep_price(kwh_price: float | None, prices: list[dict[str, Any]]) -> float
     return level if level > 1e-6 else max(abs(level), 0.1)
 
 
-def _solve_band(draw: draw_range.DrawRange, hub: ThermalParameters, config: Any) -> draw_range.SolveBand:
-    """This moment's ``draw_range.solve_band`` from the hub and the store."""
-    return draw_range.solve_band(draw, hub, probe_install(config), dt_util.now().timestamp())
+def _solve_band(draw: draw_range.DrawRange, hub: ThermalParameters, config: Any, cycling_cost: float = 0.0) -> draw_range.SolveBand:
+    """This moment's ``draw_range.solve_band`` from the hub and the store; a
+    solve engages its learned floor where a start has a price or the install
+    cannot duty-cycle (``optimizer._engaged``)."""
+    return draw_range.solve_band(draw, hub, probe_install(config), dt_util.now().timestamp(), engaged=cycling_cost > 0 or levels_clamped(config))
 
 
 def _band_fields(band: draw_range.SolveBand) -> dict[str, float]:
     """The solve copy's power range under ``band``; none where configured,
     so a configured band leaves the copy the hub's figures byte for byte."""
-    if band.source == "configured":
+    if band.source == "configured" and band.floor_source == "configured":
         return {}
     return {"max_electrical_power": band.max_kw, "min_electrical_power": band.min_kw}
 
@@ -6256,7 +6259,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator[Payload]):
             **dhw_bands,
             **self._model_corrections(now),
             **self._dhw_plan_fields(now),
-            **_band_fields(band or _solve_band(self._accuracy.draw, ctx._thermal_params, ctx._config)),
+            **_band_fields(band or _solve_band(self._accuracy.draw, ctx._thermal_params, ctx._config, self._effective_cycling_cost())),
         )
         state = replace(
             copy.deepcopy(ctx._current_state),
@@ -6288,7 +6291,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator[Payload]):
         """
         ctx = getattr(self, "_ctx", self)
         n = len(horizon.prices)
-        band = _solve_band(self._accuracy.draw, ctx._thermal_params, ctx._config)
+        band = _solve_band(self._accuracy.draw, ctx._thermal_params, ctx._config, self._effective_cycling_cost())
         config, params, state = self._solve_hubs(n, banded=True, band=band)
         space_pins, dhw_pins = self._manual_pins(solve_now, n)
         # The opt-in fuse guard (#3): a hard per-step ceiling on heat pump
@@ -6343,7 +6346,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator[Payload]):
                 dhw_blocked=self._pump_signals.dhw_blocked,
                 off_steps=quiet.off_steps,
                 quiet_actions=quiet.actions,
-            ),
+            ), compressor_running=self._start_counter.running,
         ), band)
 
     async def async_run_optimization(self) -> str | None:
@@ -10031,7 +10034,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator[Payload]):
         # (#2262), within the window the accuracy pairing below trusts; a
         # prediction recording no split, or a dwell that saw hot water, is none.
         if pending is not None and pending.get("split") is not None and pairs_interval(_utc_age_seconds(now, pending["when"]) / 3600.0) and not heat_energy.ran_hot_water(heat_energy.meter_of(self).attribution(pending["split"])):
-            draw_range.fold(self._accuracy.draw, self._measured_power, pending["split"], ctx._thermal_params, frozen=power_frozen is not None, distorted=_cop_fold_blocked(self), defrost=defrost_window.any_defrost, command=pending.get("flow_command"), experiment_s=pending["when"].timestamp() if pending.get("mode") == "system_identification" else None)
+            draw_range.fold(self._accuracy.draw, self._measured_power, pending["split"], ctx._thermal_params, frozen=power_frozen is not None, distorted=_cop_fold_blocked(self), defrost=defrost_window.any_defrost, command=pending.get("flow_command"), experiment_s=pending["when"].timestamp() if pending.get("mode") == "system_identification" else None, when_s=pending["when"].timestamp())
 
         # T5 #16: settle every matured lead-time promise against the same
         # measured temperature the one-step sample below uses. The window

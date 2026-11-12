@@ -25,7 +25,7 @@ from typing import Any, Callable, NamedTuple, Protocol
 import numpy as np
 from scipy.optimize import linprog
 
-from . import pv
+from . import pv, runs
 from .const import DHW_QUANTILE_MIN_EVENTS
 from .dhw_draws import window_label as draw_window_label
 from .dhw_schedule import (
@@ -185,6 +185,68 @@ def _place_legionella_step(
     return first + int(np.argmin(scored))
 
 
+def _commit_charges(
+    planner: DhwPlanner,
+    ctx: _DhwPlanContext,
+    plan: np.ndarray,
+    initial_temp: float,
+    draw_rates: np.ndarray,
+    requirement: np.ndarray,
+    max_temp: Any,
+    forced_off: np.ndarray | None,
+    disinfection: int | None,
+    space: np.ndarray | None,
+) -> np.ndarray:
+    """The hot-water plan as charges that run whole, where the solve plans
+    runs (``DhwPlanner.charge_runs``, set where ``optimizer._engaged``).
+
+    Each band's ``runs.commit`` mask of the plan is a candidate, its on steps
+    at ``max(plan, floor)`` under the run power; the disinfection step is
+    forced on, the forced-off steps off. A candidate counts only if the
+    tank walk keeps every floor and ceiling the plan kept. Where the space
+    plan is known, a charge that begins in or right after a space run joins
+    it and pays only the join share of a start. The cheapest at the
+    plan's own prices plus its starts ships; the plan itself competes only
+    where it already runs whole.
+    """
+    if planner.charge_runs is None or not np.any(plan > 0.0):
+        return plan
+    cost, join, running = planner.charge_runs
+    n, dt = ctx.n_steps, ctx.dt
+    floor = runs.floor_kw(planner.model.params.min_electrical_power)
+    space_on = np.zeros(n, dtype=bool) if space is None else np.asarray(space, dtype=float)[:n] > 0.0
+    joins = space_on | np.r_[running if space is not None else False, space_on[:-1]]
+    start = cost * np.where(joins, join, 1.0)
+    forced = np.full(n, np.nan)
+    if forced_off is not None:
+        forced[forced_off] = 0.0
+    if disinfection is not None:
+        forced[disinfection] = 1.0
+
+    def walk(candidate: np.ndarray) -> np.ndarray:
+        temps = planner._dhw_plan_temps(
+            candidate, initial_temp, ctx.outdoor_temps, draw_rates, dt,
+            ctx.humidity, ctx.tank_exo_kw,
+        )[1 : n + 1]
+        return np.c_[temps >= requirement - 0.05, temps <= max_temp + 0.05]
+
+    def price(candidate: np.ndarray) -> float:
+        on = candidate > 0.0
+        edges = on & ~np.r_[running, on[:-1]]
+        return float(np.sum(ctx.prices * candidate) * dt + np.sum(start[edges]))
+
+    kept = walk(plan)
+    best = (price(plan), plan) if runs.realizable(plan, floor) else None
+    masks, _exact = runs.candidates(
+        plan, ctx.prices, floor, ctx.p_dhw_max, start, dt=dt, running=running, forced=forced,
+    )
+    for mask in masks:
+        candidate = np.where(mask, np.minimum(np.maximum(plan, floor), ctx.p_dhw_max), 0.0)
+        if np.all(walk(candidate) | ~kept) and (best is None or price(candidate) < best[0]):
+            best = (price(candidate), candidate)
+    return plan if best is None else best[1]
+
+
 def _drop_off_steps(mask: np.ndarray, off: np.ndarray | None) -> np.ndarray:
     """``mask`` with Off steps removed. The same array when there is no window."""
     if off is None:
@@ -321,7 +383,7 @@ class DhwPlanner:
 
     Every input is explicit and fixed at construction. ``pv_surplus`` and
     ``price_known`` default to None, which is what a fresh optimizer held
-    before its first solve.
+    before its first solve. ``charge_runs``: ``_commit_charges``' pricing, or None.
     """
 
     def __init__(
@@ -330,11 +392,13 @@ class DhwPlanner:
         config: _PlannerConfig,
         pv_surplus: np.ndarray | None = None,
         price_known: np.ndarray | None = None,
+        charge_runs: tuple[float, float, bool] | None = None,
     ) -> None:
         self.model = model
         self.config = config
         self._pv_surplus = pv_surplus
         self._price_known = price_known
+        self.charge_runs = charge_runs
 
     def _dhw_planning_prices(
         self,
@@ -1195,6 +1259,8 @@ class DhwPlanner:
             max_temp=max_temp,
             forced_off=forced_off,
         )
+        schedule = _commit_charges(self, ctx, schedule, initial_state.dhw_temperature, draw_rates,
+                                   requirement, max_temp, forced_off, legionella_step, space_demand)
         # Not re-clamped here, because the repair now carries the clamp
         # inside its own loop: every top-up it places is followed by one,
         # so a plan leaves this stage already bounded by the per-step

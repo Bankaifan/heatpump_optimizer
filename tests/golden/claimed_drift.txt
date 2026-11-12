@@ -67,6 +67,8 @@
 # v7.1.12: Charge-dip draws, price-outage steering, disinfection set-point, off restore, card labels. The stamp empties the list; the
 # next branch restates its own footprint, claims included.
 #
+cycling_cost  # honest-starts-and-runs P1+P2: a start is priced as one start and the plan ships as runs in {0} u [p_min, p_max]; measured base fc2a7edcf vs this head on one box: sub-floor steps 9 -> 0, starts 5 -> 4 (P1 count of the base plan 4.92), energy 44.80 -> 45.04 kWh, predicted cost 34.30 -> 35.41
+everything_on  # honest-starts-and-runs P1+P2: as cycling_cost; sub-floor steps 11 -> 0, starts 4 -> 4 (P1 count of the base plan 5.23), energy 65.59 -> 68.96 kWh, predicted cost 58.98 -> 63.06, lowest room 17.69 -> 17.98 C
 # may-drift: flat_prices -- #1208 polish-every-candidate, owner ruling #1208 comment 208bed25
 # (option (a)): the move's margin is inside the noise band (objective rel
 # -1.2171e-03, deterministic on one box), so which runner sees it move is the
