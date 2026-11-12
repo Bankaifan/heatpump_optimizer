@@ -137,6 +137,17 @@ def _forced_off_with(
     return forced_off | mask
 
 
+def _under_floor_off(
+    planner: DhwPlanner, forced_off: np.ndarray | None, caps: np.ndarray | None, n_steps: int,
+) -> np.ndarray | None:
+    """``forced_off`` with every step whose cap is under the pump's floor, on
+    an install that cannot duty-cycle (``DhwPlanner.charge_runs``): no charge
+    can run there, so the planners buy its heat in the steps that remain."""
+    if caps is None or not (planner.charge_runs or (0.0, 0.0, False, False, False))[4]:
+        return forced_off
+    return _forced_off_with(forced_off, np.asarray(caps, dtype=float) < planner.model.params.min_electrical_power, n_steps)
+
+
 def _legionella_off_mask(off_steps: Any, n_steps: int) -> np.ndarray | None:
     """The Off window as a horizon mask, or None when there is no window."""
     if off_steps is None:
@@ -222,10 +233,12 @@ def _commit_charges(
     if not clamped:
         return shipped
     # The floor is physics on an install that cannot duty-cycle, whatever a
-    # start costs: a step under it runs at it, or not at all over the cap.
-    # The committed plan so lifted, or the plan's own projection (the plan
-    # before runs were committed), whichever its prices and starts make cheaper.
-    lifted = [np.where((x > 0.0) & (x < floor), floor if floor <= level else 0.0, x) for x in (shipped, plan)]
+    # start costs: a step under it runs at it, or not at all where its own
+    # cap is under the floor. The committed plan so lifted, or the plan's own
+    # projection (the plan before runs were committed), whichever its prices
+    # and starts make cheaper.
+    cap = level if ctx.step_caps is None else np.asarray(ctx.step_caps, dtype=float)[: ctx.n_steps]
+    lifted = [np.where((x > 0.0) & (x < floor), np.where(floor <= cap, floor, 0.0), x) for x in (shipped, plan)]
     return min(lifted, key=lambda x: float(np.sum(ctx.prices * x) * ctx.dt) + cost * runs.edge_count(x, charging))
 
 
@@ -370,6 +383,9 @@ class _DhwPlanContext:
     #: Combi: the space side's net flux into the shared store, kW per step,
     #: which every recursion adds where it subtracts the draw; None off combi.
     tank_exo_kw: np.ndarray | None = None
+    #: The per-step total ceiling (``power_caps_extra``) ``p_dhw_max`` takes
+    #: its minimum of, or None uncapped: what a step's own charge may draw.
+    step_caps: np.ndarray | None = None
 
     @property
     def c_dhw(self) -> float:
@@ -1202,6 +1218,7 @@ class DhwPlanner:
             # remain. Not a pin: the window is a scheduled decision, so the
             # pin-safety release loop in ``optimize`` never frees these.
             forced_off = _forced_off_with(forced_off, off_steps, n_steps)
+        forced_off = _under_floor_off(self, forced_off, h.power_caps_extra, n_steps)
 
         # Pre-heating is allowed anywhere in the horizon: the planners price the
         # standby losses of storing heat, so an early cheap hour wins only when
@@ -1222,7 +1239,7 @@ class DhwPlanner:
             p_dhw_max=p_dhw_run,
             min_run_power=min_run_power,
             max_lead_steps=max_lead_steps,
-            tank_exo_kw=tank_exo_kw,
+            tank_exo_kw=tank_exo_kw, step_caps=h.power_caps_extra,
         )
 
         # Stage 1: a linear program over the whole horizon finds the truly

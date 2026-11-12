@@ -163,6 +163,19 @@ def _charge_runs(opt: HeatPumpOptimizer, inputs: SolveInputs) -> tuple[float, fl
             cfg.clamp_planned_levels)
 
 
+def _dhw_shortfall(requirement: np.ndarray | None, trajectory: list[float]) -> float:
+    """The tank's worst shortfall against its per-step requirement, °C; zero
+    when it coasted through. Index 0 of the trajectory is the initial tank
+    temperature, not a planned one, as on the space trajectory."""
+    if requirement is None or not trajectory:
+        return 0.0
+    req = np.asarray(requirement, dtype=float)
+    planned = np.asarray(trajectory, dtype=float)
+    planned = planned[1:] if planned.size > req.size else planned
+    steps = min(planned.size, req.size)
+    return float(np.max(np.clip(req[:steps] - planned[:steps], 0.0, None))) if steps > 0 else 0.0
+
+
 def _projected(
     space: np.ndarray, other: np.ndarray, floor: float, hi: np.ndarray, duty: bool,
     rounded: bool = False,
@@ -4393,28 +4406,17 @@ class HeatPumpOptimizer:
         # majority of installs — sees byte-identical predictive_info.
         if space_blocked:
             result.predictive_info["mode_blocked_space"] = True
+        # The DHW analogue of ``power_cap_breach_c``, which is space-only:
+        # without it a hot-water block, or a cap that leaves a charge under
+        # the pump's floor, leaves no number anywhere saying how badly the
+        # tank fell short, and "the tank went cold and the plan never said so"
+        # is the same failure the space figure exists to prevent. Published
+        # under a block always; under a cap when the tank falls short on a
+        # solve that plans runs, which alone keeps charges off capped steps.
+        shortfall = _dhw_shortfall(self._dhw_requirement, result.dhw_temp_trajectory)
         if dhw_blocked:
             result.predictive_info["mode_blocked_dhw"] = True
-            # The DHW analogue of ``power_cap_breach_c``, which is space-only:
-            # without it a hot-water block leaves no number anywhere saying
-            # how badly the tank fell short, and "the tank went cold and the
-            # plan never said so" is the same failure the space figure exists
-            # to prevent. Worst shortfall against the tank's own per-step
-            # requirement, in °C; zero when the tank coasted through anyway.
-            requirement = self._dhw_requirement
-            dhw_trajectory = result.dhw_temp_trajectory
-            shortfall = 0.0
-            if requirement is not None and dhw_trajectory:
-                req = np.asarray(requirement, dtype=float)
-                planned = np.asarray(dhw_trajectory, dtype=float)
-                # Same convention as the space trajectory: index 0 is the
-                # initial tank temperature, not a planned one.
-                planned = planned[1:] if planned.size > req.size else planned
-                steps = min(planned.size, req.size)
-                if steps > 0:
-                    shortfall = float(
-                        np.max(np.clip(req[:steps] - planned[:steps], 0.0, None))
-                    )
+        if dhw_blocked or (_engaged(self) and power_caps_extra is not None and shortfall > 0.0):
             result.predictive_info["dhw_floor_breach_c"] = round(shortfall, 3)
 
         _publish_quiet_actions(result, quiet_actions, n_steps)

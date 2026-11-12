@@ -85480,6 +85480,18 @@ R.check(
     and _hs_hot.compressor_starts == _hs_edges(_hs_hot_plan + np.asarray(_hs_hot.power_schedule)),
     f"{np.round(_hs_hot_plan[_hs_hot_plan > 0], 3).tolist()}",
 )
+# The reviewer's capped hour: on/off, no start cost, hot water on, 0.9 kW on
+# steps 8-11 under a 1.1 kW floor. Only those steps lose their charge.
+_hs_cap1 = np.r_[np.full(8, 3.3), np.full(4, 0.9), np.full(84, 3.3)]
+_hs_c1 = _hs_solve(0.0, _hs_sine, clamp=True, dhw=True, power_caps_extra=_hs_cap1)
+_hs_c1_tot = np.asarray(_hs_c1.power_schedule) + np.asarray(_hs_c1.dhw_power_schedule)
+R.check(
+    "P4: one capped hour on an on/off install leaves hot water charged elsewhere, no "
+    "step over its cap and the tank hot",
+    sum(_hs_c1.dhw_power_schedule) > 0.0 and bool(np.all(_hs_c1_tot <= _hs_cap1 + 1e-9))
+    and min(_hs_c1.dhw_temp_trajectory) >= 45.0,
+    f"{sum(_hs_c1.dhw_power_schedule) * 0.25:.2f} kWh, tank {min(_hs_c1.dhw_temp_trajectory):.1f}",
+)
 _hs_cfg = _hs_om.OptimizationConfig(cycling_cost=2.5)
 _hs_opt = _hs_om.HeatPumpOptimizer(_HsTM(_HsTP(min_electrical_power=_HS_F)), _hs_cfg)
 _hs_free = _hs_om.HeatPumpOptimizer(_HsTM(_HsTP(min_electrical_power=_HS_F)),
