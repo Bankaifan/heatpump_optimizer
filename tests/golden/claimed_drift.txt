@@ -119,6 +119,20 @@ everything_on  # honest-starts-and-runs P1+P2: as cycling_cost; sub-floor steps 
 # keys (prices/outdoor_temps/price_known/baseline_cost) still fail. Remove
 # when drift lanes are pinned or the polish improvement scale leaves
 # 5e-5-2e-2.
+# (honest-starts-and-runs suspends cycling_cost's may-drift entry for its claim below; restore it,
+#  verbatim, when the stamp empties the list) cycling_cost -- #1207 keep-gate (2e-2 -> 2e-5), owner directive
+# #1207 comment c1329fe (2026-09-20): the move's margin is inside the noise
+# band (objective rel -1.7666e-04, deterministic on one box),
+# runner-conditional for the same reason; judged keys still fail. Remove
+# when drift lanes are pinned or the polish improvement scale leaves
+# 5e-5-2e-2.
+# (honest-starts-and-runs suspends everything_on's may-drift entry for its claim below; restore it,
+#  verbatim, when the stamp empties the list) everything_on -- #1207 keep-gate (2e-2 -> 2e-5), owner
+# directive #1207 comment c1329fe (2026-09-20): the move's margin is inside
+# the noise band (objective rel -5.2974e-03, deterministic on one box),
+# runner-conditional for the same reason; judged keys still fail. Remove
+# when drift lanes are pinned or the polish improvement scale leaves
+# 5e-5-2e-2.
 # may-drift: narrow_band -- #1207 keep-gate (2e-2 -> 2e-5), owner directive
 # #1207 comment c1329fe (2026-09-20): the move's margin is inside the noise
 # band (objective rel -7.8934e-04, deterministic on one box),

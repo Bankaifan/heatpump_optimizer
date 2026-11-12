@@ -85393,12 +85393,12 @@ _hs_masks = {b: _hs.commit(_hs_q, _hs_pr, _HS_F, 3.3, 2.5, b, dt=0.25, forced=_h
 _hs_bal = {b: abs(float(np.sum(_hs_level(_hs_q, m) - _hs_q) * 0.25)) for b, (m, _) in _hs_masks.items()}
 _hs_run = np.r_[np.zeros(10), np.full(20, 2.0), np.zeros(66)]
 _hs_long, _ = _hs.commit(np.tile([0.6, 0.0], 48), np.ones(96), _HS_F, 3.3, 0.0, 2, dt=0.25,
-                         min_on=3, min_off=3)
+                         lengths=(3, 3))
 _hs_lens = [len(list(g)) for _, g in __import__("itertools").groupby(_hs_long)]
 R.check(
     "P2 commit: forced steps kept, the end balance within half a floor step, fewer "
     "starts the wider the band, identity on a realizable input, every inner run and "
-    "pause at least min_on/min_off steps",
+    "pause at least the shortest run and pause",
     all(e and m[5] and m[70] and not m[30] and not m[31] for m, e in _hs_masks.values())
     and all(v <= _HS_F * 0.25 / 2 + 1e-9 for v in _hs_bal.values())
     and _hs.start_count(_hs_level(_hs_q, _hs_masks[24][0]), _HS_F)

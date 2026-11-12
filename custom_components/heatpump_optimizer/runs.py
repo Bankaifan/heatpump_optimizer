@@ -112,13 +112,14 @@ def realizable(total: Any, floor: float) -> bool:
 def commit(
     q: Any, prices: Any, floor: float, caps: Any, start_cost: Any, band: int,
     *, dt: float, running: bool = False, forced: Any = None,
-    min_on: int = 1, min_off: int = 1,
+    lengths: tuple[int, int] = (1, 1),
 ) -> tuple[np.ndarray, bool]:
     """The on/off mask that runs the relaxed plan ``q`` cheapest, and whether
     it tracked within its band.
 
     A dynamic program over the steps with the state (on or off, run or pause
-    length up to ``min_on`` or ``min_off`` steps, energy balance). The balance
+    length up to ``lengths``, the shortest run and pause in steps, energy
+    balance). The balance
     is the committed energy less ``q``'s up to that step, on a grid of
     ``QUANTA_PER_STEP`` cells per floor step, held within ``band`` floor steps
     and within half a floor step at the end. An on step runs at ``max(q,
@@ -131,6 +132,7 @@ def commit(
     """
     q = np.asarray(q, dtype=float)
     n = q.size
+    min_on, min_off = lengths
     f = floor_kw(floor)
     cap = np.broadcast_to(np.asarray(caps, dtype=float), (n,))
     want = np.full(n, np.nan) if forced is None else np.array(forced, dtype=float)[:n]
@@ -182,11 +184,11 @@ def candidates(
     ``MIN_ON`` and ``MIN_OFF`` step counts of ``dt``, and whether they track.
     Where a band holds no mask, the tightest best effort alone, with False."""
     masks: list[np.ndarray] = []
-    lengths = {"min_on": steps_at_least(MIN_ON, dt), "min_off": steps_at_least(MIN_OFF, dt)}
+    lengths = (steps_at_least(MIN_ON, dt), steps_at_least(MIN_OFF, dt))
     for band in BANDS:
         mask, exact = commit(
             q, prices, floor, caps, start_cost, band, dt=dt, running=running,
-            forced=forced, **lengths,
+            forced=forced, lengths=lengths,
         )
         if not exact:
             return masks or [mask], bool(masks)
