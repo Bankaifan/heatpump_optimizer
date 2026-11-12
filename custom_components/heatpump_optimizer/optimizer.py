@@ -163,7 +163,7 @@ def _charge_runs(opt: HeatPumpOptimizer, inputs: SolveInputs) -> tuple[float, fl
             cfg.clamp_planned_levels)
 
 
-def _dhw_shortfall(requirement: np.ndarray | None, trajectory: list[float]) -> float:
+def _tank_shortfall(requirement: np.ndarray | None, trajectory: list[float]) -> float:
     """The tank's worst shortfall against its per-step requirement, °C; zero
     when it coasted through. Index 0 of the trajectory is the initial tank
     temperature, not a planned one, as on the space trajectory."""
@@ -4413,7 +4413,7 @@ class HeatPumpOptimizer:
         # is the same failure the space figure exists to prevent. Published
         # under a block always; under a cap when the tank falls short on a
         # solve that plans runs, which alone keeps charges off capped steps.
-        shortfall = _dhw_shortfall(self._dhw_requirement, result.dhw_temp_trajectory)
+        shortfall = _tank_shortfall(self._dhw_requirement, result.dhw_temp_trajectory)
         if dhw_blocked:
             result.predictive_info["mode_blocked_dhw"] = True
         if dhw_blocked or (_engaged(self) and power_caps_extra is not None and shortfall > 0.0):
