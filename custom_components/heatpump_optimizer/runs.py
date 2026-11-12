@@ -57,7 +57,7 @@ def _share(power: np.ndarray, floor: float) -> np.ndarray:
     return np.clip(power / floor, 0.0, 1.0)
 
 
-def _before(share: np.ndarray, first: float) -> np.ndarray:
+def _prior_share(share: np.ndarray, first: float) -> np.ndarray:
     """Each step's predecessor share, ``first`` before step 0."""
     out = np.empty_like(share)
     out[:, 0] = first
@@ -93,12 +93,12 @@ def start_count_batch(
     rows = np.asarray(total, dtype=float)
     f = floor_kw(floor)
     share = _share(rows, f)
-    count: np.ndarray = row_sums(share * (1.0 - _before(share, 1.0 if running else 0.0)))
+    count: np.ndarray = row_sums(share * (1.0 - _prior_share(share, 1.0 if running else 0.0)))
     if dhw is None or (to_space <= 0.0 and to_dhw <= 0.0):
         return count
     hot = np.broadcast_to(np.asarray(dhw, dtype=float), rows.shape)
     s, d = _share(rows - hot, f), _share(hot, f)
-    s0, d0 = _before(s, 0.0), _before(d, 0.0)
+    s0, d0 = _prior_share(s, 0.0), _prior_share(d, 0.0)
     into_space = d * s + d0 * (1.0 - s0) * s * (1.0 - d)
     return count + to_space * row_sums(into_space) + to_dhw * row_sums(s0 * d)
 
