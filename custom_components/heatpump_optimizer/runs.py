@@ -2,7 +2,7 @@
 relaxed plan to runs the pump can run (docs/design/2026-11-12-honest-starts-and-runs).
 
 A start is an off-to-on edge of the compressor, whatever level it starts to;
-a level change inside a run is none. ``starts`` counts them on the combined
+a level change inside a run is none. ``start_count`` counts them on the combined
 draw in a reading the solver can descend: ``r[k] = min(1, q[k] / floor)`` is
 the share of step k the compressor runs, and each step starts the share of it
 that follows the previous step's off share. On a plan whose steps are all off
@@ -65,21 +65,21 @@ def _before(share: np.ndarray, first: float) -> np.ndarray:
     return out
 
 
-def starts(
+def start_count(
     total: Any, floor: float, running: bool = False, dhw: Any = None,
     to_space: float = 0.0, to_dhw: float = 0.0,
 ) -> float:
-    """The start count of one plan; the one-row case of ``starts_batch``."""
-    return float(starts_batch(
+    """The start count of one plan; the one-row case of ``start_count_batch``."""
+    return float(start_count_batch(
         np.asarray(total, dtype=float)[None, :], floor, running, dhw, to_space, to_dhw,
     )[0])
 
 
-def starts_batch(
+def start_count_batch(
     total: np.ndarray, floor: float, running: bool = False, dhw: Any = None,
     to_space: float = 0.0, to_dhw: float = 0.0,
 ) -> np.ndarray:
-    """``starts`` for a [B, n] batch of combined draws, one entry per row.
+    """``start_count`` for a [B, n] batch of combined draws, one entry per row.
 
     ``running``: the compressor runs at solve time, so a run continuing from
     it is no start, and a stop and a restart is one. ``dhw`` is the hot-water

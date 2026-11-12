@@ -7263,7 +7263,7 @@ def _check_batch_cost_948(label, cap):
     # objective_batch call on the 6-row matrix above.
     with _count_entries_948(
         (_PvOpt, "_comfort_terms"),
-        (_grad_optmod.runs, "starts"),
+        (_grad_optmod.runs, "start_count"),
         (_grad_optmod, "peak_cost_smooth"),
         (_PvModel, "simulate_trajectory"),
         (_PvModel, "simulate_trajectory_batch"),
@@ -7280,7 +7280,7 @@ def _check_batch_cost_948(label, cap):
     R.check(
         f"and without the per-row grid-term helpers: {label}",
         cyc == 0 and peak == 0,
-        f"runs.starts entered {cyc} times, peak_cost_smooth {peak} times "
+        f"runs.start_count entered {cyc} times, peak_cost_smooth {peak} times "
         f"(the solver's capacity term is the smooth surrogate since #1210; "
         f"the exact peak_cost is billed/published only and never batched)",
     )
@@ -7348,7 +7348,7 @@ _check_batch_cost_948(
 )
 
 # The batch twins under their own branch grids, one level below the
-# objective: every arm peak_cost and runs.starts branch on, priced per
+# objective: every arm peak_cost and runs.start_count branch on, priced per
 # row against the scalar function on the same plan. Rule: row b of the
 # batch result must equal the scalar function on row b's plan, exactly,
 # for every (offset, window length, factors) arm -- separated peaks, the
@@ -7361,8 +7361,8 @@ _check_batch_cost_948(
 # the plateau gate does not fire.
 from heatpump_optimizer.tariff import peak_cost_batch as _pcb948
 from heatpump_optimizer.runs import (
-    starts as _cyc948,
-    starts_batch as _cpb948,
+    start_count as _cyc948,
+    start_count_batch as _cpb948,
 )
 
 _rows948 = np.vstack([
@@ -7431,7 +7431,7 @@ _cyc_bad948 = [
     != _cyc948(_rows948[_b948], 2.0)
 ]
 R.check(
-    "runs.starts_batch is runs.starts on every row, bit for bit",
+    "runs.start_count_batch is runs.start_count on every row, bit for bit",
     not _cyc_bad948,
     f"divergent rows: {_cyc_bad948}",
 )
@@ -67631,8 +67631,8 @@ import sys as _f22_sys  # noqa: E402
 from heatpump_optimizer import thermal_model as _f22_tm  # noqa: E402
 from heatpump_optimizer.dhw_planner import _DHW_MIN_RUN_CHUNK as _F22_CHUNK  # noqa: E402
 from heatpump_optimizer.runs import (  # noqa: E402
-    starts as _f22_cyc,
-    starts_batch as _f22_cyc_batch,
+    start_count as _f22_cyc,
+    start_count_batch as _f22_cyc_batch,
 )
 
 
@@ -85354,13 +85354,13 @@ R.check(
     "P1: a realizable plan counts its integer edges; a constant trickle under the floor "
     "is not free; a level change inside a run, and a run continuing from a running "
     "compressor, cost nothing; a start to the floor costs what one to the maximum does",
-    _hs.starts([0, 1.2, 2.0, 0, 0, 1.1, 0], _HS_F) == 2.0
-    and _hs.starts(np.full(8, 0.3), _HS_F) > 1.0
-    and _hs.starts([1.1, 3.0, 1.5], _HS_F) == 1.0
-    and _hs.starts([1.1, 2.0], _HS_F, running=True) == 0.0
-    and _hs.starts([1.1, 0.0, 1.1], _HS_F, running=True) == 1.0
-    and _hs.starts([0, 1.1], _HS_F) == _hs.starts([0, 3.3], _HS_F) == 1.0
-    and np.isfinite(_hs.starts([0.0, 0.05], 0.0)),
+    _hs.start_count([0, 1.2, 2.0, 0, 0, 1.1, 0], _HS_F) == 2.0
+    and _hs.start_count(np.full(8, 0.3), _HS_F) > 1.0
+    and _hs.start_count([1.1, 3.0, 1.5], _HS_F) == 1.0
+    and _hs.start_count([1.1, 2.0], _HS_F, running=True) == 0.0
+    and _hs.start_count([1.1, 0.0, 1.1], _HS_F, running=True) == 1.0
+    and _hs.start_count([0, 1.1], _HS_F) == _hs.start_count([0, 3.3], _HS_F) == 1.0
+    and np.isfinite(_hs.start_count([0.0, 0.05], 0.0)),
 )
 _hs_tot = np.array([[0, 1.1, 2.0, 2.0, 1.1, 0], [0.4, 0.6, 2.2, 0, 1.5, 1.5]])
 _hs_hot = np.array([0, 0, 1.2, 0, 0, 1.5])
@@ -85368,13 +85368,13 @@ R.check(
     "P4 duty: a both step and a hot-water-then-space boundary each count the into-space "
     "probability, space-then-hot-water the other; with none the count is P1's; batch "
     "rows are the scalar bit for bit",
-    _hs.starts([1.1, 2.5, 1.1], _HS_F, dhw=[0, 1.2, 0], to_space=0.3) == 1.0 + 0.3
-    and _hs.starts([1.2, 1.1], _HS_F, dhw=[1.2, 0], to_space=0.3, to_dhw=0.7) == 1.3
-    and _hs.starts([1.1, 1.2], _HS_F, dhw=[0, 1.2], to_space=0.3, to_dhw=0.7) == 1.7
-    and _hs.starts(_hs_tot[1], _HS_F, dhw=_hs_hot) == _hs.starts(_hs_tot[1], _HS_F)
+    _hs.start_count([1.1, 2.5, 1.1], _HS_F, dhw=[0, 1.2, 0], to_space=0.3) == 1.0 + 0.3
+    and _hs.start_count([1.2, 1.1], _HS_F, dhw=[1.2, 0], to_space=0.3, to_dhw=0.7) == 1.3
+    and _hs.start_count([1.1, 1.2], _HS_F, dhw=[0, 1.2], to_space=0.3, to_dhw=0.7) == 1.7
+    and _hs.start_count(_hs_tot[1], _HS_F, dhw=_hs_hot) == _hs.start_count(_hs_tot[1], _HS_F)
     and all(
-        np.float64(_hs.starts_batch(_hs_tot, _HS_F, run, _hs_hot, 0.3, 0.7)[b]).tobytes()
-        == np.float64(_hs.starts(_hs_tot[b], _HS_F, run, _hs_hot, 0.3, 0.7)).tobytes()
+        np.float64(_hs.start_count_batch(_hs_tot, _HS_F, run, _hs_hot, 0.3, 0.7)[b]).tobytes()
+        == np.float64(_hs.start_count(_hs_tot[b], _HS_F, run, _hs_hot, 0.3, 0.7)).tobytes()
         for b in range(2) for run in (False, True)
     ),
 )
@@ -85401,8 +85401,8 @@ R.check(
     "pause at least min_on/min_off steps",
     all(e and m[5] and m[70] and not m[30] and not m[31] for m, e in _hs_masks.values())
     and all(v <= _HS_F * 0.25 / 2 + 1e-9 for v in _hs_bal.values())
-    and _hs.starts(_hs_level(_hs_q, _hs_masks[24][0]), _HS_F)
-    <= _hs.starts(_hs_level(_hs_q, _hs_masks[2][0]), _HS_F)
+    and _hs.start_count(_hs_level(_hs_q, _hs_masks[24][0]), _HS_F)
+    <= _hs.start_count(_hs_level(_hs_q, _hs_masks[2][0]), _HS_F)
     and np.array_equal(_hs.commit(_hs_run, np.ones(96), _HS_F, 3.3, 2.5, 2, dt=0.25)[0], _hs_run > 0)
     and min(_hs_lens[1:-1]) >= 3,
     f"balances {_hs_bal}, run lengths {_hs_lens[:8]}",
@@ -85432,9 +85432,9 @@ R.check(
     "P2 dispatch: a priced start ships every step off or in [floor, cap], publishes the "
     "plan's integer count, and starts no more often than the relaxed plan reads",
     bool(np.all((_hs_plan == 0.0) | ((_hs_plan >= _HS_F - 1e-9) & (_hs_plan <= 3.3 + 1e-9))))
-    and _hs_priced.compressor_starts == _hs.starts(_hs_plan, _HS_F)
-    and _hs_priced.compressor_starts <= _hs.starts(_hs_relaxed, _HS_F),
-    f"starts {_hs_priced.compressor_starts} relaxed {_hs.starts(_hs_relaxed, _HS_F):.2f}, "
+    and _hs_priced.compressor_starts == _hs.start_count(_hs_plan, _HS_F)
+    and _hs_priced.compressor_starts <= _hs.start_count(_hs_relaxed, _HS_F),
+    f"starts {_hs_priced.compressor_starts} relaxed {_hs.start_count(_hs_relaxed, _HS_F):.2f}, "
     f"sub-floor {int(np.sum((_hs_plan > 0) & (_hs_plan < _HS_F - 1e-9)))}",
 )
 _hs_cfg = _hs_om.OptimizationConfig(cycling_cost=2.5)
@@ -85513,12 +85513,12 @@ R.check(
     "P4: a committed hot-water plan starts less, runs every on step in [floor, run power], "
     "holds the disinfection step and every floor the uncommitted plan held; unengaged it "
     "is the plan itself",
-    _hs.starts(_hs_charged, _HS_F) < _hs.starts(_hs_pulses, _HS_F)
+    _hs.start_count(_hs_charged, _HS_F) < _hs.start_count(_hs_pulses, _HS_F)
     and bool(np.all((_hs_charged == 0) | ((_hs_charged >= _HS_F) & (_hs_charged <= 2.6))))
     and _hs_charged[40] > 0
     and bool(np.all((_hs_walk >= _hs_req - 0.05) | (_hs_walk0 < _hs_req - 0.05)))
     and _hs_charge(0.0)[1] is _hs_pulses,
-    f"starts {_hs.starts(_hs_charged, _HS_F)} from {_hs.starts(_hs_pulses, _HS_F)}",
+    f"starts {_hs.start_count(_hs_charged, _HS_F)} from {_hs.start_count(_hs_pulses, _HS_F)}",
 )
 
 sys.exit(R.close("FEATURE CHECKS"))

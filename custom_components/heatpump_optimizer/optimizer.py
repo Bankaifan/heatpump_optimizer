@@ -2075,7 +2075,7 @@ class OptimizationConfig:
     # defrost penalty. Nothing in either optimizer path used to stop a plan
     # from chattering between steps.
     #
-    # Priced as the plan's start count (``runs.starts``), a smooth reading of
+    # Priced as the plan's start count (``runs.start_count``), a smooth reading of
     # off-to-on edges, and committed to runs after the relaxed solve
     # (``_commit_runs``) rather than as a true minimum-runtime constraint: that
     # would make it a MILP, which is not affordable inside a 30-second Home
@@ -2088,7 +2088,7 @@ class OptimizationConfig:
     cycling_cost: float = DEFAULT_CYCLING_COST
     #: The learned probability that a duty change into space heating, and into
     #: hot water, stops the compressor: each such change inside a run counts
-    #: that share of a start (``runs.starts_batch``). 0 until learned.
+    #: that share of a start (``runs.start_count_batch``). 0 until learned.
     duty_stop_to_space: float = 0.0
     duty_stop_to_dhw: float = 0.0
 
@@ -3310,9 +3310,12 @@ class HeatPumpOptimizer:
                 credited = planner._dhw_planner_draws(raw, wood_temps)
                 coil_replan = not np.allclose(credited, raw, atol=1e-9)
             if draw_rates is not None and self.model.params.dhw_store.combi:
-                # A feasibility repair, not a scored candidate (its docstring).
-                return space_power, _combi_flux_exchange(
-                    self, h, planner, space_power, dhw_power, draw_rates, p_max), status
+                # A feasibility repair, not a scored candidate (its docstring);
+                # space committed beside the old plan is re-committed beside it.
+                exchanged = _combi_flux_exchange(self, h, planner, space_power, dhw_power, draw_rates, p_max)
+                if _engaged(self) and not runs.realizable(space_power + exchanged, self.model.params.min_electrical_power):
+                    space_power, status, _ = solve_space(exchanged, space_power)
+                return space_power, exchanged, status
             if not bool(np.any(pinned)) and not coil_replan:
                 return space_power, dhw_power, status
 
@@ -3448,7 +3451,7 @@ class HeatPumpOptimizer:
         def cycling_batch(power_matrix: np.ndarray, dhw: np.ndarray | None = None) -> np.ndarray:
             if cfg.cycling_cost <= 0:
                 return np.zeros(np.shape(power_matrix)[0])
-            return cfg.cycling_cost * runs.starts_batch(power_matrix, floor, running, dhw, *duty)
+            return cfg.cycling_cost * runs.start_count_batch(power_matrix, floor, running, dhw, *duty)
 
         # One billing record for the scalar closure and its batch twin, so
         # the two can never disagree about the tariff they are pricing. The
@@ -5076,7 +5079,7 @@ class HeatPumpOptimizer:
             "peak_kw": round(peak_kw, 3),
             "peak_cost": round(peak_cost(total_power, baseline_load, bill), 3),
             "starts": (
-                int(round(runs.starts(total_power, self.model.params.min_electrical_power, running)))
+                int(round(runs.start_count(total_power, self.model.params.min_electrical_power, running)))
                 if _engaged(self) else count_compressor_starts(total_power)
             ),
         }
