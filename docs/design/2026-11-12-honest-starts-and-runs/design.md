@@ -95,9 +95,9 @@ Already on main and relied on: #3308 (replaced by P2), #3405 and #3433 (the feed
 3. Floor: high asks alone never raise it; `MIN_SAMPLES` floor asks drawing 1.1 against a configured 0.53 raise it to 1.1; a pump drawing its ask keeps the configured figure; lapse and reconfiguration drop it.
 4. P4: a both step and a hot-water-then-space boundary each count `p`; with no usable direction the count is P1's; a committed hot-water plan holds the uncommitted plan's floors.
 
-Null controls: (a) at zero cost on an install that can duty-cycle, every plan is byte-identical: 53 of the 56 goldens. (b) An empty duty-switch learner against one saturated at p = 1 with a zero cost: identical plans. (c) A relaxed plan that is already realizable ships unchanged.
+Null controls: (a) at zero cost on an install that can duty-cycle, every plan is byte-identical: 53 of the 55 value goldens. (b) An empty duty-switch learner against one saturated at p = 1 with a zero cost: identical plans. (c) A relaxed plan that is already realizable ships unchanged.
 
-Goldens that move, claimed with direction in `tests/golden/claimed_drift.txt`: `cycling_cost`, `everything_on`, `coord_all_features`, the three that price a start; their plans hold 9 and 11 sub-floor steps today (first two, measured). `runs.py` enters a measured closure in `tests/closures.json`; the deleted projection pays `tests/structure_budgets.json`.
+Goldens that move, claimed with direction in `tests/golden/claimed_drift.txt`: `cycling_cost` and `everything_on`, the two solver goldens that price a start (`coord_all_features` also prices one, but its capture does not solve); their plans hold 9 and 11 sub-floor steps today (first two, measured). `runs.py` enters a measured closure in `tests/closures.json`; the deleted projection pays `tests/structure_budgets.json`.
 
 Replay: the reporter's day as `tests/replay/bankaifan-2026-11-12.json` (`hpo-replay/1`, from the debug bundle), run with modulating, 0.53 kW configured and the wear price. Acceptance on it:
 - at most 4 compressor starts in 24 h, no planned run or pause under 10 min, no planned level between 0.1 kW and the band's floor;
@@ -121,6 +121,20 @@ Measured on the golden scenarios: a space solve makes 8 `_lbfgsb_run` calls toda
 1. A priced start engages bundling on a modulating install too, which moves the three goldens. Engaging on on_off alone would leave row 1 as it is.
 2. P3: the learned floor moves the plan (proposed), or stays a notice beside the configured figure.
 3. Whether P4's hot-water half joins R10-DUTY-SWITCH-PLANNER-PRICE or R10-OUTSIDE-DHW-START-HYSTERESIS or is a group of its own, and whether P1 and P2 land as one group.
+
+## As built in this pull request
+
+Base `6e100ef698` (v7.1.12). Where the build differs from the sections above, this section is the record.
+
+- **P1**: `runs.start_count` and its batch twin; `SolveInputs.compressor_running`, from the start counter, or on an install without a power meter from the executing step's on-state. `compressor_starts` publishes the shipped plan's integer edge count.
+- **P2**: `runs.commit` over `BANDS`, a balance outside its band penalised (`OUT_OF_BAND`) rather than refused, the bands widening to the whole horizon before the best effort. **Never worse than the projection**: the per-step raise of the relaxed plan, and of the plan relaxed without the start term, ride as candidates, and the lowest objective with the start term ships. Any failure in the commit stage ships the projection, never an unprojected guess. On an install that can duty-cycle, a step capped under the floor still cycles; on one that cannot, it stays off and the cap holds.
+- **P3**: the floor store admits only asks at or under the configured floor × (1 + `AGREE_TOLERANCE`), and each sample lapses on its own age, so an engaged plan cannot ratchet the floor: it lapses back to the configured figure and is learned again. Persisted as `draw/floor`.
+- **P4**: hot-water charges through `runs.commit_store`, a program on the planner's linear store (0.25 K grid, `STORE_GRID_K`, floors and ceilings as hard bounds, a partial step where a charge reaches the ceiling), checked against the planner's real walk; on a combi store inside every round of the flux exchange, then the space plan re-committed. On an install that cannot duty-cycle every shipped charge is 0 or at the floor or above at any start cost, and a step capped under the floor is a forced-off step whose heat is bought elsewhere; an unmet floor is published as `dhw_floor_breach_c`. `SolveInputs.charge_running` says whether a charge is under way.
+- **Duty-switch price**: `OptimizationConfig.duty_stop_to_space` and `duty_stop_to_dhw`, default 0.0, priced by the start count and the charge join. Not wired to #3461's learner, not on main; the `median_off_s` headroom cut waits with it.
+- **Not built**: the previous plan's mask as a candidate; #3440's start rule; the reporter's replay file.
+- **Run and pause minimums** `MIN_ON`, `MIN_OFF` live in `runs.py`; `early_cutoff` imports them.
+
+Measured on the reporter's install, synthetic (600 l combi store, 1.1 to 3.3 kW, flat prices 0.34 to 0.45, house heat loss and store cooling assumed), base → head: 19 → 4 starts at modulating / 0.53 kW / 10; 13 → 4 at on_off / 1.1 / 0.25; 25.6 → 11.0 kWh at on_off / 1.1 / 10 (no running through); no run under 10 min and no step between 0.1 kW and the floor on any variant; room 24.0 to 24.9 °C; tap at or above 47 °C inside the hot-water windows. `tests/stress.py`: all checks pass.
 
 ## Notes for the fixer
 
