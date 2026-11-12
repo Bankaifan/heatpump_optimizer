@@ -18,8 +18,10 @@ Kept free of Home Assistant imports so it can be unit-tested directly.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
-from typing import Any
+from functools import partial
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -37,6 +39,8 @@ MIN_OFF = timedelta(minutes=10)
 BANDS = (2, 6, 24)
 #: The balance grid: cells per floor step of energy.
 QUANTA_PER_STEP = 4
+#: ``commit_store``'s temperature grid, kelvin per cell.
+STORE_GRID_K = 0.25
 #: What a step pays for leaving the relaxed plan's own on/off reading: a tie
 #: break only, so a mask that saves nothing keeps the plan's runs.
 TIE_BREAK = 1e-9
@@ -143,22 +147,27 @@ def commit(
     reading = q > 0.0
     quantum = f * dt / QUANTA_PER_STEP
     half = QUANTA_PER_STEP * int(band)
-    states = min_on + min_off
-    cost = np.full((states, 2 * half + 1), np.inf)
-    bal = np.zeros_like(cost)
-    cost[min_on - 1 if running else states - 1, half] = 0.0
+    cost, bal = _origin(lengths, 2 * half + 1, running, half, 0.0)
     trail = []
     exact = True
+
+    def place(b: np.ndarray, clip: bool) -> tuple[np.ndarray, np.ndarray]:
+        j = np.rint(b / quantum).astype(np.int64) + half
+        if clip:
+            j = np.clip(j, 0, 2 * half)
+        return j, (j >= 0) & (j <= 2 * half)
+
     for k in range(n):
         moves = _moves(min_on, min_off, want[k])
+        on_inc, off_inc = (level[k] - q[k]) * dt, -q[k] * dt
         steps = (
-            ((level[k] - q[k]) * dt, on_cost[k] + TIE_BREAK * (not reading[k])),
-            (-q[k] * dt, TIE_BREAK * reading[k]),
+            (lambda b, i=on_inc: b + i, on_cost[k] + TIE_BREAK * (not reading[k])),
+            (lambda b, i=off_inc: b + i, TIE_BREAK * reading[k]),
         )
-        nxt = _advance(cost, bal, moves, steps, float(start[k]), quantum, half, min_on, False)
+        nxt = _advance(cost, bal, moves, steps, float(start[k]), partial(place, clip=False), min_on)
         if not np.isfinite(nxt[0]).any():
             exact = False
-            nxt = _advance(cost, bal, moves, steps, float(start[k]), quantum, half, min_on, True)
+            nxt = _advance(cost, bal, moves, steps, float(start[k]), partial(place, clip=True), min_on)
         cost, bal = nxt[0], nxt[1]
         trail.append(nxt[2])
     live = np.isfinite(cost)
@@ -169,11 +178,113 @@ def commit(
         keys = (cost[inside], np.abs(bal[inside]))
     order = np.lexsort(keys)
     u, j = (int(a[order[0]]) for a in np.nonzero(inside))
-    mask = np.zeros(n, dtype=bool)
-    for k in range(n - 1, -1, -1):
-        mask[k] = u < min_on
-        u, j = (int(v) for v in trail[k][:, u, j])
-    return mask, exact
+    return _unwind(trail, u, j, min_on), exact
+
+
+class Store(NamedTuple):
+    """The planner's linear store over the horizon (``dhw_planner``'s
+    ``_plan_dhw_min_cost``): ``T[k+1] = decay * T[k] + drift[k]``, plus up to
+    ``heat(k, T)`` kelvin on a charging step, and the bounds ``floors[k]``
+    and ``ceilings[k]`` on ``T[k+1]``. A charge stops at the ceiling, as the
+    pump's own controller ends it there."""
+
+    initial: float
+    decay: float
+    drift: np.ndarray
+    heat: Callable[[int, np.ndarray], np.ndarray]
+    floors: np.ndarray
+    ceilings: np.ndarray
+
+
+def commit_store(
+    store: Store, on_cost: np.ndarray, start_cost: Any,
+    *, running: bool = False, forced: Any = None, lengths: tuple[int, int] = (1, 1),
+) -> np.ndarray | None:
+    """The cheapest charge mask that keeps ``store`` inside its bounds at
+    every step, or ``None`` where none does; a charge that reaches the
+    ceiling runs part of its step (``charge_shares``) and ends its run.
+
+    ``commit``'s program with the store temperature, on a ``STORE_GRID_K``
+    grid, in place of the energy balance: an on step costs ``on_cost`` for
+    the share it runs and adds its heat, an off-to-on edge costs
+    ``start_cost`` (scalar or per step), ``forced`` and ``lengths`` as there.
+    Each cell keeps the exact temperature of the cheapest path into it, so
+    rounding does not accrue.
+    """
+    n = np.size(on_cost)
+    lo = min(store.initial, float(np.min(store.floors)))
+    width = int(np.ceil((max(store.initial, float(np.max(store.ceilings))) - lo) / STORE_GRID_K)) + 1
+    want = np.full(n, np.nan) if forced is None else np.array(forced, dtype=float)[:n]
+    start = np.broadcast_to(np.asarray(start_cost, dtype=float), (n,))
+    cost, temp = _origin(lengths, width, running, int(round((store.initial - lo) / STORE_GRID_K)), store.initial)
+    trail = []
+    for k in range(n):
+        def place(t: np.ndarray, k: int = k) -> tuple[np.ndarray, np.ndarray]:
+            j = np.rint((t - lo) / STORE_GRID_K).astype(np.int64)
+            return j, (t >= store.floors[k]) & (t <= store.ceilings[k]) & (j >= 0) & (j < width)
+
+        idle = (lambda t, k=k: store.decay * t + store.drift[k], 0.0)
+        steps = ((lambda t, k=k: idle[0](t) + store.heat(k, t), float(on_cost[k])), idle)
+        whole = _advance(cost, temp, _moves(*lengths, want[k]), steps, float(start[k]), place, lengths[0])
+        topped = _advance(cost, temp, [] if want[k] == 0.0 else _tops(lengths), (
+            steps[0], (lambda t, k=k: _charged(store, k, t)[0],
+                       lambda t, k=k: float(on_cost[k]) * _charged(store, k, t)[1]),
+        ), float(start[k]), place, lengths[0])
+        top = topped[0] < whole[0]
+        cost, temp = np.where(top, topped[0], whole[0]), np.where(top, topped[1], whole[1])
+        if not np.isfinite(cost).any():
+            return None
+        trail.append(np.concatenate([np.where(top, topped[2], whole[2]), top[None]]))
+    u, j = (int(a) for a in np.unravel_index(np.argmin(cost), cost.shape))
+    return _unwind(trail, u, j, lengths[0])
+
+
+def charge_shares(store: Store, mask: np.ndarray) -> np.ndarray:
+    """The share of each step ``mask`` charges, walked on ``store``: 1 for a
+    whole step, less where the charge reaches the ceiling, 0 off."""
+    share, t = np.zeros(len(mask)), np.array([store.initial])
+    for k, on in enumerate(mask):
+        t, share[k] = (_charged(store, k, t)[0], float(_charged(store, k, t)[1][0])) if on else (
+            store.decay * t + store.drift[k], 0.0)
+    return share
+
+
+def _tops(lengths: tuple[int, int]) -> list[tuple[int, int, bool]]:
+    """The moves of a charge that reaches the ceiling: from any run, or with a
+    start from any pause, into a pause, since the charge ends there."""
+    min_on, states = lengths[0], sum(lengths)
+    return [(i, min_on, i >= min_on) for i in range(states)]
+
+
+def _charged(store: Store, k: int, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The store after a charging step ``k`` from ``t``, and the share of the
+    step the charge ran before it reached the ceiling."""
+    idle = store.decay * t + store.drift[k]
+    heat = store.heat(k, t)
+    end = np.minimum(idle + heat, np.maximum(idle, store.ceilings[k]))
+    return end, np.clip((end - idle) / np.maximum(heat, 1e-12), 0.0, 1.0)
+
+
+def _origin(
+    lengths: tuple[int, int], width: int, running: bool, cell: int, value: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The program's state before step 0: cost 0 in ``cell``, a long run
+    or pause, as ``running`` says."""
+    cost = np.full((sum(lengths), width), np.inf)
+    val = np.zeros_like(cost)
+    row = lengths[0] - 1 if running else sum(lengths) - 1
+    cost[row, cell], val[row, cell] = 0.0, value
+    return cost, val
+
+
+def _unwind(trail: list[np.ndarray], u: int, j: int, min_on: int) -> np.ndarray:
+    """The mask the back pointers in ``trail`` lead to from state ``(u, j)``;
+    a third layer marks a step that charged into a pause."""
+    mask = np.zeros(len(trail), dtype=bool)
+    for k in range(len(trail) - 1, -1, -1):
+        mask[k] = u < min_on or (len(trail[k]) > 2 and bool(trail[k][2, u, j]))
+        u, j = (int(v) for v in trail[k][:2, u, j])
+    return mask
 
 
 def candidates(
@@ -216,29 +327,31 @@ def _moves(min_on: int, min_off: int, want: float) -> list[tuple[int, int, bool]
 
 
 def _advance(
-    cost: np.ndarray, bal: np.ndarray, moves: list[tuple[int, int, bool]],
-    steps: tuple[tuple[float, float], tuple[float, float]], start: float,
-    quantum: float, half: int, min_on: int, clip: bool,
+    cost: np.ndarray, val: np.ndarray, moves: list[tuple[int, int, bool]],
+    steps: tuple[tuple[Callable[[np.ndarray], np.ndarray], Any], ...], start: float,
+    place: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]], min_on: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """One step of ``commit``'s program: the cheapest arrival per cell, and
-    where it came from. ``clip`` holds an out-of-band balance at the band's
-    edge instead of dropping it."""
+    """One step of the program: the cheapest arrival per cell, and where it
+    came from. ``steps`` is ``(move, cost)`` on and off, ``move`` taking a
+    cell's value to the next and ``cost`` a float or a function of the value; ``place`` gives each new value its cell and
+    whether it is inside the bounds."""
     width = cost.shape[1]
     new_cost = np.full_like(cost, np.inf)
-    new_bal = np.zeros_like(bal)
+    new_bal = np.zeros_like(val)
     back = np.zeros((2,) + cost.shape, dtype=np.int32)
     cells = np.arange(width)
     for dest in sorted({m[1] for m in moves}):
         srcs = [(s, st) for s, d, st in moves if d == dest]
-        inc, extra = steps[0] if dest < min_on else steps[1]
-        c = np.concatenate([cost[s] + extra + (start if st else 0.0) for s, st in srcs])
-        b = np.concatenate([bal[s] + inc for s, _ in srcs])
+        move, extra = steps[0] if dest < min_on else steps[1]
+        c = np.concatenate([
+            cost[s] + (extra(val[s]) if callable(extra) else extra) + (start if st else 0.0)
+            for s, st in srcs
+        ])
+        b = np.concatenate([move(val[s]) for s, _ in srcs])
         origin = np.concatenate([np.full(width, s) for s, _ in srcs])
         came = np.tile(cells, len(srcs))
-        j = np.rint(b / quantum).astype(np.int64) + half
-        if clip:
-            j = np.clip(j, 0, width - 1)
-        ok = np.isfinite(c) & (j >= 0) & (j < width)
+        j, inside = place(b)
+        ok = np.isfinite(c) & inside
         if not ok.any():
             continue
         c, b, origin, came, j = c[ok], b[ok], origin[ok], came[ok], j[ok]

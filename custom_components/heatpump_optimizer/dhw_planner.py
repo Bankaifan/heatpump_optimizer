@@ -200,23 +200,25 @@ def _commit_charges(
     """The hot-water plan as charges that run whole, where the solve plans
     runs (``DhwPlanner.charge_runs``, set where ``optimizer._engaged``).
 
-    Each band's ``runs.commit`` mask of the plan is a candidate, its on steps
-    at ``max(plan, floor)`` under the run power; the disinfection step is
-    forced on, the forced-off steps off. A candidate counts only if the
-    tank walk keeps every floor and ceiling the plan kept. Where the space
-    plan is known, a charge that begins in or right after a space run joins
-    it and pays only the join share of a start. The cheapest at the
-    plan's own prices plus its starts ships; the plan itself competes only
-    where it already runs whole.
+    ``runs.commit_store`` over the LP's own linear store (decay, gain, draw
+    and, on a combi store, the space side's flux): every on step charges at
+    the run power, for the share of the step before the store reaches its
+    ceiling, at the step's price and the COP at the store's temperature, inside every floor and ceiling the plan's walk kept (and no
+    lower or higher than the plan went where it did not). The disinfection
+    step is forced on, the forced-off steps off. Where the space plan is
+    known, a charge that begins in or right after a space run joins it and
+    pays only the join share of a start. The mask ships only if the
+    planner's real walk keeps those floors and ceilings; otherwise the plan
+    stands.
     """
-    if planner.charge_runs is None or not np.any(plan > 0.0):
+    level = ctx.p_dhw_max
+    floor = runs.floor_kw(planner.model.params.min_electrical_power)
+    if planner.charge_runs is None or not np.any(plan > 0.0) or level < floor or ctx.c_dhw <= 0.0:
         return plan
     cost, join, running = planner.charge_runs
     n, dt = ctx.n_steps, ctx.dt
-    floor = runs.floor_kw(planner.model.params.min_electrical_power)
     space_on = np.zeros(n, dtype=bool) if space is None else np.asarray(space, dtype=float)[:n] > 0.0
     joins = space_on | np.r_[running if space is not None else False, space_on[:-1]]
-    start = cost * np.where(joins, join, 1.0)
     forced = np.full(n, np.nan)
     if forced_off is not None:
         forced[forced_off] = 0.0
@@ -224,27 +226,44 @@ def _commit_charges(
         forced[disinfection] = 1.0
 
     def walk(candidate: np.ndarray) -> np.ndarray:
-        temps = planner._dhw_plan_temps(
+        return planner._dhw_plan_temps(
             candidate, initial_temp, ctx.outdoor_temps, draw_rates, dt,
             ctx.humidity, ctx.tank_exo_kw,
         )[1 : n + 1]
-        return np.c_[temps >= requirement - 0.05, temps <= max_temp + 0.05]
 
-    def price(candidate: np.ndarray) -> float:
-        on = candidate > 0.0
-        edges = on & ~np.r_[running, on[:-1]]
-        return float(np.sum(ctx.prices * candidate) * dt + np.sum(start[edges]))
-
-    kept = walk(plan)
-    best = (price(plan), plan) if runs.realizable(plan, floor) else None
-    masks, _exact = runs.candidates(
-        plan, ctx.prices, floor, ctx.p_dhw_max, start, dt=dt, running=running, forced=forced,
+    held = walk(plan)
+    floors = np.minimum(requirement, held)
+    ceilings = np.maximum(max_temp, held)
+    decay, gain = ctx.tank_decay
+    exo = np.zeros(n) if ctx.tank_exo_kw is None else np.asarray(ctx.tank_exo_kw, dtype=float)[:n]
+    grid = np.arange(np.floor(min(initial_temp, floors.min())), np.ceil(ceilings.max()) + 1.0)
+    cop = np.array([planner._dhw_cop_profile(ctx.outdoor_temps, np.full(n, t), ctx.humidity) for t in grid])
+    per_cop = heat_per_cop_kw(planner.model.params, level) * dt / ctx.c_dhw
+    store = runs.Store(
+        initial_temp, decay, gain - (np.asarray(draw_rates, dtype=float)[:n] - exo) * dt / ctx.c_dhw,
+        lambda k, t: np.interp(t, grid, cop[:, k]) * per_cop, floors, ceilings,
     )
-    for mask in masks:
-        candidate = np.where(mask, np.minimum(np.maximum(plan, floor), ctx.p_dhw_max), 0.0)
-        if np.all(walk(candidate) | ~kept) and (best is None or price(candidate) < best[0]):
-            best = (price(candidate), candidate)
-    return plan if best is None else best[1]
+    mask = runs.commit_store(
+        store, ctx.prices * level * dt, cost * np.where(joins, join, 1.0), running=running, forced=forced,
+        lengths=(runs.steps_at_least(runs.MIN_ON, dt), runs.steps_at_least(runs.MIN_OFF, dt)),
+    )
+    if mask is None:
+        return plan
+    # The shares on the planner's own COP at the walked temperature, not the table's.
+    share = runs.charge_shares(store._replace(heat=lambda k, t: planner._dhw_cop_profile(
+        ctx.outdoor_temps[k : k + 1], t, None if ctx.humidity is None else ctx.humidity[k : k + 1],
+    ) * per_cop), mask)
+    # A charge cut at the ceiling draws what its share of the heat takes; the
+    # rating clamp then trims what the linear store left over it.
+    params = planner.model.params
+    committed = planner._clamp_dhw_to_capacity(
+        plan=np.where(share >= 1.0, level, power_for_heat_per_cop_kw(params, share * heat_per_cop_kw(params, level))),
+        initial_temp=initial_temp, outdoor_temps=ctx.outdoor_temps, draw_rates=draw_rates, dt=dt,
+        max_temp=max_temp, humidity=ctx.humidity, exo_kw=ctx.tank_exo_kw,
+    )
+    temps = walk(committed)
+    kept = np.all(temps >= floors - 0.05) and np.all(temps <= ceilings + 0.05)
+    return committed if kept else plan
 
 
 def _drop_off_steps(mask: np.ndarray, off: np.ndarray | None) -> np.ndarray:

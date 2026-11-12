@@ -85503,18 +85503,19 @@ def _hs_charge(cost):
     planner = _HsPlanner(_hs_tm, _hs_om.OptimizationConfig(), charge_runs=(
         (cost, 0.0, False) if cost > 0 else None))
     return planner, _hs_charges(planner, _hs_ctx, _hs_pulses, 50.0, _hs_draws, _hs_req,
-                                _hs_tp.dhw_max_temp, None, 40, None)
+                                np.full(96, _hs_tp.dhw_max_temp), None, 40, None)
 
 
 _hs_pl, _hs_charged = _hs_charge(2.5)
 _hs_walk = _hs_pl._dhw_plan_temps(_hs_charged, 50.0, _hs_ctx.outdoor_temps, _hs_draws, 0.25)[1:]
 _hs_walk0 = _hs_pl._dhw_plan_temps(_hs_pulses, 50.0, _hs_ctx.outdoor_temps, _hs_draws, 0.25)[1:]
 R.check(
-    "P4: a committed hot-water plan starts less, runs every on step in [floor, run power], "
-    "holds the disinfection step and every floor the uncommitted plan held; unengaged it "
-    "is the plan itself",
+    "P4: a committed hot-water plan starts less, runs every on step at the run power or "
+    "ends a run at the ceiling, holds the disinfection step and every floor the "
+    "uncommitted plan held; unengaged it is the plan itself",
     _hs.start_count(_hs_charged, _HS_F) < _hs.start_count(_hs_pulses, _HS_F)
-    and bool(np.all((_hs_charged == 0) | ((_hs_charged >= _HS_F) & (_hs_charged <= 2.6))))
+    and bool(np.all((_hs_charged == 0) | np.isclose(_hs_charged, 2.6)
+                    | ((_hs_charged < 2.6) & (np.r_[_hs_charged[1:], 0.0] == 0))))
     and _hs_charged[40] > 0
     and bool(np.all((_hs_walk >= _hs_req - 0.05) | (_hs_walk0 < _hs_req - 0.05)))
     and _hs_charge(0.0)[1] is _hs_pulses,
