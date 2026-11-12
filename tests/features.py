@@ -85492,6 +85492,25 @@ R.check(
     and min(_hs_c1.dhw_temp_trajectory) >= 45.0,
     f"{sum(_hs_c1.dhw_power_schedule) * 0.25:.2f} kWh, tank {min(_hs_c1.dhw_temp_trajectory):.1f}",
 )
+# Disinfection due under a cap below the floor on steps 0-7: the step moves
+# to one that can charge, and the published hour is the step that runs.
+_hs_lp = _HsTP(min_electrical_power=_HS_F, max_electrical_power=3.3, dhw_enabled=True,
+               dhw_legionella_enabled=True)
+_hs_lc = np.r_[np.full(8, 0.9), np.full(88, 3.3)]
+_hs_l = _hs_om.HeatPumpOptimizer(_HsTM(_hs_lp), _hs_om.OptimizationConfig(clamp_planned_levels=True)).optimize(
+    inputs=solve_inputs(
+        initial_state=_HsTS(room_temperature=21.0, slab_temperature=22.0, outdoor_temperature=6.0,
+                            dhw_hours_since_legionella=720.0),
+        prices=_hs_sine, outdoor_temps=np.full(96, 6.0), start_time=datetime(2026, 1, 10, tzinfo=UTC),
+        power_caps_extra=_hs_lc,
+    ))
+_hs_l_dhw = np.asarray(_hs_l.dhw_power_schedule)
+_hs_l_step = int(round(_hs_l.predictive_info["dhw_legionella_step_hour"] / 0.25))
+R.check(
+    "P4: a disinfection step under a cap below the floor moves to a step that charges",
+    not _hs_l_dhw[:8].any() and _hs_l_step >= 8 and _hs_l_dhw[_hs_l_step] > 0.0,
+    f"step {_hs_l_step}, charging {np.flatnonzero(_hs_l_dhw)[:6].tolist()}",
+)
 _hs_cfg = _hs_om.OptimizationConfig(cycling_cost=2.5)
 _hs_opt = _hs_om.HeatPumpOptimizer(_HsTM(_HsTP(min_electrical_power=_HS_F)), _hs_cfg)
 _hs_free = _hs_om.HeatPumpOptimizer(_HsTM(_HsTP(min_electrical_power=_HS_F)),

@@ -142,7 +142,8 @@ def _under_floor_off(
 ) -> np.ndarray | None:
     """``forced_off`` with every step whose cap is under the pump's floor, on
     an install that cannot duty-cycle (``DhwPlanner.charge_runs``): no charge
-    can run there, so the planners buy its heat in the steps that remain."""
+    can run there, so the planners buy its heat in the steps that remain, and
+    the disinfection step is placed on one that can charge."""
     if caps is None or not (planner.charge_runs or (0.0, 0.0, False, False, False))[4]:
         return forced_off
     return _forced_off_with(forced_off, np.asarray(caps, dtype=float) < planner.model.params.min_electrical_power, n_steps)
@@ -1176,7 +1177,7 @@ class DhwPlanner:
             floor_temps=floor_temps,
             p_dhw_run=p_dhw_run,
             dhw_prices=dhw_prices,
-            off_steps=off_steps,
+            off_steps=_under_floor_off(self, _legionella_off_mask(off_steps, n_steps), h.power_caps_extra, n_steps),
             exo_kw=tank_exo_kw,
         )
 
