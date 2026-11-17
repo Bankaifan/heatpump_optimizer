@@ -284,7 +284,7 @@ FEEDBACK_WINDOW = timedelta(minutes=3)
 FEEDBACK_START_HOLD = timedelta(minutes=5)
 #: How far the target moves per minute outside the deadband, K. Time-based,
 #: not per pass: passes come from the cycle, the tick and the listener.
-FEEDBACK_RATE_K_PER_MIN = 0.2
+FEEDBACK_RATE_K_PER_MIN = 0.5
 #: The deadband on the draw error: this share of the planned level, or of
 #: the band's floor where the plan asks less, so a sub-minimum level gets no
 #: narrower band than the modulation floor's. Inside it the target is held,
